@@ -8,6 +8,10 @@
 
 ![alt text](image.png)
 
+## 下载
+
+开箱即用：[Releases](https://github.com/FROSTultra/FrostMirror/releases) 页面下载 `FrostMirror-x.x.x-portable.exe`，免安装，双击即用。程序未做代码签名，Windows 提示"未知发布者"时点"更多信息 → 仍要运行"即可。
+
 ## 功能
 
 - **置顶毛玻璃** — 始终浮在所有窗口上方，Win32 亚克力模糊效果，不遮挡阅读
