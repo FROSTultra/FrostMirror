@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>FrostMirror · 镜语</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="bar topbar">
+    <div class="traffic">
+      <div class="tip-host">
+        <button class="light red" id="btnClose" aria-label="缩到托盘"></button>
+        <span class="tip">缩到托盘</span>
+      </div>
+      <div class="tip-host">
+        <button class="light yellow" id="btnMin" aria-label="最小化"></button>
+        <span class="tip">最小化</span>
+      </div>
+      <div class="tip-host">
+        <button class="light green" id="btnMax" aria-label="最大化 / 还原"></button>
+        <span class="tip">最大化 / 还原</span>
+      </div>
+    </div>
+    <div class="tip-host pin-host">
+      <button class="icon-btn" id="btnPin" aria-label="取消置顶">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 4h6l1 7 2 2H6l2-2 1-7z" />
+          <line x1="12" y1="13" x2="12" y2="20" />
+          <line x1="9" y1="17" x2="15" y2="17" />
+        </svg>
+      </button>
+      <span class="tip" id="pinTip">取消置顶</span>
+    </div>
+  </header>
+
+  <main class="body">
+    <div class="island" id="island">
+      <button class="island-pill" id="islandPill">
+        <span id="islandLabel">自动</span>
+        <svg class="island-caret" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+      <div class="island-panel hidden" id="islandPanel">
+        <button class="lang-opt active" data-lang="auto">自动(中英互换 / 设备语言)</button>
+        <div class="lang-divider"></div>
+        <button class="lang-opt" data-lang="zh-CN">中文</button>
+        <button class="lang-opt" data-lang="en">English</button>
+        <button class="lang-opt" data-lang="ja">日本語</button>
+        <button class="lang-opt" data-lang="ko">한국어</button>
+        <button class="lang-opt" data-lang="fr">Français</button>
+        <button class="lang-opt" data-lang="de">Deutsch</button>
+        <button class="lang-opt" data-lang="es">Español</button>
+        <button class="lang-opt" data-lang="ru">Русский</button>
+        <button class="lang-opt" data-lang="pt">Português</button>
+        <button class="lang-opt" data-lang="it">Italiano</button>
+        <div class="lang-divider"></div>
+        <label class="deep-row">
+          <span class="deep-name">深度模式<span class="deep-desc">更慢 · 更耗 token</span></span>
+          <input type="checkbox" id="deepCheck" />
+        </label>
+        <p class="deep-warn hidden" id="deepWarn">⚠ 已开启:思考会让翻译更慢、消耗更多 token(费用更高),普通句子建议关闭。</p>
+      </div>
+    </div>
+    <div class="columns">
+      <div id="inputHint">输入文字,回车翻译…</div>
+      <textarea id="input" spellcheck="false"></textarea>
+      <div class="result hidden" id="result">
+        <div class="result-dst" id="resultDst"></div>
+        <button class="copy-btn" id="btnCopy">复制</button>
+      </div>
+    </div>
+  </main>
+
+  <footer class="bar statusbar">
+    <span id="meta">
+      <span class="m-item"><span class="m-ic">⏱</span><span id="timeText">-- ms</span></span>
+      <span class="m-sep">·</span>
+      <span class="m-item">
+        <svg class="m-ic" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5.5" rx="8" ry="2.8" />
+          <path d="M4 5.5v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V5.5" />
+          <path d="M4 12v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V12" />
+        </svg>
+        <span id="tokenText">-- tokens</span>
+      </span>
+      <span class="m-sep">·</span>
+      <span class="m-item hidden" id="modeBadge"><span class="m-ic" id="modeIc">📖</span><span id="modeText">词典</span></span>
+    </span>
+    <button class="model-btn" id="btnModel">未配置模型</button>
+  </footer>
+
+  <dialog id="settingsDialog">
+    <form id="settingsForm">
+      <h2>设置</h2>
+      <label>接口地址(OpenAI 兼容)
+        <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
+      </label>
+      <label>模型 ID
+        <input name="model" placeholder="deepseek-chat" required />
+      </label>
+      <label>API Key
+        <input name="apiKey" type="password" placeholder="sk-…" required />
+      </label>
+      <p class="hint">Key 将用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
+      <label class="deep-row">
+        <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
+        <input type="checkbox" id="clipWatchCheck" />
+      </label>
+      <label>全局热键(任意应用呼出窗口,accelerator 格式)
+        <input id="hotkeyInput" placeholder="Alt+Q" />
+      </label>
+      <p class="validate-msg" id="hotkeyMsg"></p>
+      <div class="dialog-actions">
+        <button type="submit" id="btnSave">保存并验证</button>
+        <button type="button" id="btnCancel">取消</button>
+      </div>
+      <p class="validate-msg" id="validateMsg"></p>
+    </form>
+  </dialog>
+
+  <!-- 首次启动引导:两步玻璃小卡(介绍 → 配置),完成后不再出现 -->
+  <div class="overlay hidden" id="onboarding">
+    <div class="ob-card" id="obStep1">
+      <h2>FrostMirror · 镜语</h2>
+      <p class="ob-text">一个置顶的小玻璃窗:输入中文得英文,输入英文得中文,一键复制。读英文资料时它永远浮在窗口最前面,随叫随到。</p>
+      <p class="ob-text dim">它需要一个你自己的 AI 接口(OpenAI 兼容格式)。去任意 AI 平台申请一个 API Key 即可,比如 DeepSeek——几块钱够用很久。</p>
+      <button class="ob-primary" id="obNext">开始配置</button>
+    </div>
+    <div class="ob-card hidden" id="obStep2">
+      <h2>配置接口</h2>
+      <form id="obForm">
+        <label>接口地址(OpenAI 兼容)
+          <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
+        </label>
+        <label>模型 ID
+          <input name="model" placeholder="deepseek-chat" required />
+        </label>
+        <label>API Key
+          <input name="apiKey" type="password" placeholder="sk-…" required />
+        </label>
+        <p class="hint">Key 会用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
+        <div class="dialog-actions">
+          <button type="button" class="ob-back" id="obBack">上一步</button>
+          <button type="submit" class="ob-primary" id="obSave">保存并验证</button>
+        </div>
+        <p class="validate-msg" id="obMsg"></p>
+      </form>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
