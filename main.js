@@ -1,7 +1,9 @@
-const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const koffi = require('koffi');
+const { streamChatCompletion } = require('./stream');
+const { buildTermRegex, findTermHits, parseCsv } = require('./terms-core');
 
 // 便携软件路线:不写用户 C 盘。
 // 打包后:配置存在 exe 旁边(便携 exe 取 PORTABLE_EXECUTABLE_DIR,zip 版取 exe 所在目录);
@@ -10,6 +12,54 @@ const PORTABLE_DIR = process.env.PORTABLE_EXECUTABLE_DIR
   || (app.isPackaged ? path.dirname(app.getPath('exe')) : '');
 
 const SETTINGS_FILE = path.join(PORTABLE_DIR || __dirname, 'settings.json');
+
+// 历史记录:与 settings.json 同目录(便携=exe 旁),最新在前,超过 200 条裁掉最旧
+const HISTORY_FILE = path.join(path.dirname(SETTINGS_FILE), 'history.json');
+const HISTORY_LIMIT = 200;
+
+function loadHistory() {
+  try { return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { return []; }
+}
+
+function saveHistory(list) {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(list));
+}
+
+function addHistory(entry) {
+  const list = loadHistory();
+  list.unshift({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    time: Date.now(),
+    ...entry,
+  });
+  if (list.length > HISTORY_LIMIT) list.length = HISTORY_LIMIT;
+  try { saveHistory(list); } catch (e) { console.log('[frost-mirror] 历史写入失败:', e.message); }
+}
+
+// ---- 术语表:与 settings.json 同目录 terms.json;双通道(语境=提示词软约束,默认 / 严格=占位符保护) ----
+const TERMS_FILE = path.join(path.dirname(SETTINGS_FILE), 'terms.json');
+const PRESET_FILE = path.join(__dirname, 'assets', 'terms-preset.json');
+
+function loadTerms() {
+  try {
+    const t = JSON.parse(fs.readFileSync(TERMS_FILE, 'utf8'));
+    return {
+      enabled: t.enabled !== false,
+      channel: t.channel === 'strict' ? 'strict' : 'context',
+      terms: Array.isArray(t.terms) ? t.terms : [],
+    };
+  } catch {
+    return { enabled: true, channel: 'context', terms: [] };
+  }
+}
+
+function saveTerms(data) {
+  fs.writeFileSync(TERMS_FILE, JSON.stringify(data, null, 2));
+}
+
+function termId() {
+  return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
 
 if (PORTABLE_DIR) {
   // Chromium 的缓存/存储也搬到 exe 旁的 glass-data,彻底不占用 C 盘
@@ -22,6 +72,7 @@ let isQuitting = false;
 // 剪贴板监听状态:主进程轮询记录上次读到的内容与本应用最近写入的内容(防自循环)
 let lastClipText = '';
 let lastAppWrittenText = '';
+let lastDispatchedClip = ''; // 最近一次已触发翻译的剪贴板内容:热键只翻新内容,不重复翻旧内容
 let clipWatchEnabled = true;
 
 function readSettings() {
@@ -134,23 +185,73 @@ const LANG_NAMES = {
 // 词典模式提示词:孤词查询时列出全部常见义项,而非按句子翻译
 const DICT_PROMPT = '这是一个词典查询。请列出该词的所有常见义项:按词性分组,每项给出中文释义和一条简短例句;常用搭配与习语也请列出。';
 
-async function translate({ baseUrl, model, apiKey, text, target, deep, mode }) {
+async function translate({ baseUrl, model, apiKey, text, target, deep, mode, signal, onDelta }) {
   const isDict = mode === 'dict';
   const langName = LANG_NAMES[target] || target;
-  const system = isDict
+  let system = isDict
     ? `你是一个词典。只输出词典内容本身,不要任何解释或额外文字。${DICT_PROMPT}`
     : `你是一个翻译引擎。只输出译文本身,不要任何解释或额外文字。目标语言:${langName}。`;
-  const data = await chatCompletion(baseUrl, model, apiKey, {
+
+  // 术语表联动:仅整句翻译通道生效;词典通道只做"用户译名置顶"
+  const terms = loadTerms();
+  const activeTerms = terms.enabled ? terms.terms.filter((t) => t.enabled !== false) : [];
+  let termHits = [];
+  let placeholderMap = null;
+  let work = text;
+
+  if (isDict) {
+    const hit = activeTerms.find((t) => t.source.trim().toLowerCase() === text.trim().toLowerCase());
+    if (hit) {
+      system += `\n注意:用户已为该词指定译名「${hit.target}」,请把对应义项放在最前面并标注为用户指定译法。`;
+    }
+  } else if (activeTerms.length) {
+    termHits = findTermHits(text, activeTerms);
+    if (termHits.length && terms.channel === 'strict') {
+      // 严格通道:命中的词先替换成占位符,提示词要求原样保留,返回后还原成译名(确定性)
+      placeholderMap = [];
+      termHits.forEach((t, i) => {
+        const re = buildTermRegex(t.source, !!t.caseSensitive);
+        const before = work;
+        work = work.replace(re, `⟪${i}⟫`);
+        if (work !== before) placeholderMap[i] = t;
+      });
+      if (placeholderMap.some(Boolean)) {
+        system += '\n文本中形如 ⟪数字⟫ 的是占位符,请在译文中原样保留,不要翻译、改写或删除它们。';
+      } else {
+        placeholderMap = null; // 全都没实际替换成功,按无术语处理
+      }
+    } else if (termHits.length) {
+      // 语境通道(默认):对照表软约束,词性/语境不符时允许自然译法
+      const lines = termHits.map((t) =>
+        `- ${t.source} → ${t.target === t.source ? '(保持原文不译)' : t.target}${t.desc ? `(${t.desc})` : ''}`
+      );
+      system += `\n\n术语对照表(翻译时优先遵循;若词性/语境明显不符,可选更自然的译法):\n${lines.join('\n')}`;
+    }
+  }
+
+  const r = await streamChatCompletion(baseUrl, model, apiKey, {
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: text },
+      { role: 'user', content: work },
     ],
     temperature: 0.2,
-  }, { thinking: !!deep, effort: 'low' });
-  return {
-    translation: (data.choices?.[0]?.message?.content || '').trim(),
-    tokens: data.usage?.total_tokens ?? 0,
-  };
+  }, { thinking: !!deep, effort: 'low', signal, onDelta });
+
+  let translation = r.translation;
+  if (placeholderMap) {
+    // 占位符还原;模型改写导致对不上的残留占位符直接清掉,避免露出奇怪符号
+    translation = (translation || '').replace(/⟪(\d+)⟫/g, (m, n) => {
+      const t = placeholderMap[Number(n)];
+      return t ? t.target : m;
+    }).replace(/⟪\d+⟫/g, '');
+  }
+
+  // 冲突检测(语境通道):原文命中了条目但译文没采用译名 → 渲染层显示小标记
+  const termConflicts = placeholderMap || isDict || !termHits.length
+    ? []
+    : termHits.filter((t) => t.target !== t.source && !(translation || '').includes(t.target)).map((t) => t.source);
+
+  return { translation, tokens: r.tokens, termConflicts };
 }
 
 // ---- Win32 亚克力模糊 ----
@@ -276,14 +377,130 @@ ipcMain.handle('settings:set-deep-mode', (e, v) => {
   saveSettings(cur);
 });
 
-ipcMain.handle('translate:run', async (e, { text, target, mode }) => {
+// 进行中的流式翻译:seq → AbortController。渲染层 reset/发起新请求时中止旧流,避免白白消耗 token。
+const activeRuns = new Map();
+
+ipcMain.handle('translate:run', async (e, { text, target, mode, seq }) => {
   const s = readSettings();
   if (!s.apiKey || !s.baseUrl || !s.model) {
     throw new Error('请先在设置里填写 API Key、接口地址和模型');
   }
+  const controller = new AbortController();
+  activeRuns.set(seq, controller);
+  const timer = setTimeout(() => controller.abort(), 60000); // 60 秒整体上限,避免永远"翻译中…"
   const started = Date.now();
-  const r = await translate({ ...s, text, target, deep: s.deepMode, mode });
-  return { ...r, ms: Date.now() - started };
+  try {
+    const r = await translate({
+      ...s, text, target, deep: s.deepMode, mode,
+      signal: controller.signal,
+      onDelta: (delta) => {
+        try { e.sender.send('translate:delta', { seq, delta }); } catch {}
+      },
+    });
+    const out = { ...r, ms: Date.now() - started };
+    addHistory({ text, translation: r.translation || '', mode, target, tokens: r.tokens, ms: out.ms });
+    return out;
+  } finally {
+    clearTimeout(timer);
+    activeRuns.delete(seq);
+  }
+});
+
+ipcMain.handle('translate:cancel', (e, seq) => {
+  const c = activeRuns.get(seq);
+  if (c) {
+    c.abort();
+    activeRuns.delete(seq);
+  }
+});
+
+// ---- 历史记录 IPC ----
+ipcMain.handle('history:list', () => loadHistory());
+ipcMain.handle('history:delete', (e, id) => {
+  const list = loadHistory().filter((x) => x.id !== id);
+  try { saveHistory(list); } catch (err) { console.log('[frost-mirror] 历史写入失败:', err.message); }
+});
+ipcMain.handle('history:clear', () => {
+  try { saveHistory([]); } catch (err) { console.log('[frost-mirror] 历史清空失败:', err.message); }
+});
+
+// ---- 术语表 IPC ----
+ipcMain.handle('terms:get', () => loadTerms());
+
+ipcMain.handle('terms:set-config', (e, cfg) => {
+  const t = loadTerms();
+  if (typeof cfg.enabled === 'boolean') t.enabled = cfg.enabled;
+  if (cfg.channel === 'strict' || cfg.channel === 'context') t.channel = cfg.channel;
+  saveTerms(t);
+});
+
+ipcMain.handle('terms:add', (e, { source, target, desc }) => {
+  const src = String(source || '').trim();
+  const dst = String(target || '').trim();
+  if (!src || !dst) throw new Error('原文与译名都要填写');
+  const t = loadTerms();
+  const exist = t.terms.find((x) => (x.source || '').toLowerCase() === src.toLowerCase());
+  if (exist) {
+    exist.target = dst;
+    exist.desc = String(desc || '').trim();
+    saveTerms(t);
+    return { updated: true };
+  }
+  t.terms.push({ id: termId(), source: src, target: dst, desc: String(desc || '').trim(), caseSensitive: false, enabled: true });
+  saveTerms(t);
+  return { updated: false };
+});
+
+ipcMain.handle('terms:remove', (e, id) => {
+  const t = loadTerms();
+  t.terms = t.terms.filter((x) => x.id !== id);
+  saveTerms(t);
+});
+
+ipcMain.handle('terms:toggle', (e, { id, enabled }) => {
+  const t = loadTerms();
+  const item = t.terms.find((x) => x.id === id);
+  if (item) {
+    item.enabled = !!enabled;
+    saveTerms(t);
+  }
+});
+
+ipcMain.handle('terms:import-csv', (e, text) => {
+  const rows = parseCsv(text).filter((r) => r[0] && r[1]);
+  if (rows[0] && /^source$/i.test(rows[0][0])) rows.shift(); // 跳过表头
+  const t = loadTerms();
+  let added = 0;
+  let updated = 0;
+  for (const r of rows) {
+    const [src, dst, desc = '', cs = ''] = r;
+    const exist = t.terms.find((x) => (x.source || '').toLowerCase() === src.toLowerCase());
+    if (exist) {
+      exist.target = dst;
+      if (desc) exist.desc = desc;
+      exist.caseSensitive = /^true$/i.test(cs);
+      updated++;
+    } else {
+      t.terms.push({ id: termId(), source: src, target: dst, desc, caseSensitive: /^true$/i.test(cs), enabled: true });
+      added++;
+    }
+  }
+  saveTerms(t);
+  return { added, updated };
+});
+
+ipcMain.handle('terms:restore-preset', () => {
+  const preset = JSON.parse(fs.readFileSync(PRESET_FILE, 'utf8'));
+  const t = loadTerms();
+  let added = 0;
+  for (const p of preset) {
+    if (!p.source || !p.target) continue;
+    if (t.terms.some((x) => (x.source || '').toLowerCase() === p.source.toLowerCase())) continue;
+    t.terms.push({ id: termId(), source: p.source, target: p.target, desc: p.desc || '', caseSensitive: false, enabled: true });
+    added++;
+  }
+  saveTerms(t);
+  return { added };
 });
 
 ipcMain.handle('window:minimize', () => win?.minimize());
@@ -299,6 +516,14 @@ ipcMain.handle('clipboard:write', (e, t) => {
   const s = String(t ?? '');
   clipboard.writeText(s);
   lastAppWrittenText = s; // 记录本应用写入的内容,轮询读到时忽略,避免复制译文又触发翻译
+  lastDispatchedClip = s; // 复制译文后按热键,也不应把译文再翻一遍
+});
+ipcMain.handle('shell:open-external', (e, url) => {
+  // 只允许 http/https,防止渲染层借道打开任意本地程序/协议
+  try {
+    const u = new URL(String(url));
+    if (u.protocol === 'https:' || u.protocol === 'http:') shell.openExternal(u.href);
+  } catch {}
 });
 
 // ---- 剪贴板监听(复制即翻)----
@@ -318,6 +543,7 @@ function startClipWatch() {
       return;
     }
     if (text.length > 2000) return;
+    lastDispatchedClip = text; // 复制即翻已处理过该内容,之后热键呼出不再重复翻译
     // 不夺焦点:窗口显示但焦点留在用户当前应用,不打断阅读;热键呼出才抢焦点
     if (!win.isVisible()) win.showInactive();
     win.webContents.send('clipboard:changed', { text, source: 'watch' });
@@ -342,7 +568,9 @@ function onHotkeyTrigger() {
   win.focus();
   let text = '';
   try { text = clipboard.readText(); } catch {}
-  if (text && text.length <= 2000) {
+  // 只翻"新"内容:与最近一次已触发翻译的剪贴板相同 → 只呼出窗口,不重复翻译
+  if (text && text.length <= 2000 && text !== lastDispatchedClip) {
+    lastDispatchedClip = text;
     win.webContents.send('clipboard:changed', { text, source: 'hotkey' });
   }
 }

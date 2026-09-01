@@ -1,7 +1,8 @@
 node_modules/
-glass-data/
+.zcode/
 settings.json
-*.log
-npm-debug.log*
-.DS_Store
-Thumbs.db
+history.json
+terms.json
+dist/
+release/
+.test-md.log

@@ -1,5 +1,23 @@
 const $ = (id) => document.getElementById(id);
 
+// ---- Markdown 渲染管线:marked 解析(关闭原始 HTML)→ DOMPurify 消毒 → innerHTML ----
+// AI 输出是外部不可信输入,消毒必须在插入 DOM 前完成
+if (typeof marked !== 'undefined') {
+  marked.use({ breaks: true, gfm: true, html: false });
+}
+
+function setResultHtml(md) {
+  const raw = String(md ?? '');
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+    $('resultDst').textContent = raw; // 库加载失败的兜底:纯文本
+    return;
+  }
+  $('resultDst').innerHTML = DOMPurify.sanitize(marked.parse(raw), {
+    USE_PROFILES: { html: true },
+    SANITIZE_NAMED_PROPS: true,
+  });
+}
+
 function updateMeta(timeText, tokenText) {
   $('timeText').textContent = timeText;
   $('tokenText').textContent = tokenText;
@@ -30,7 +48,7 @@ window.api.getSettings().then((s) => {
   $('clipWatchCheck').checked = !!s.clipWatch;
   $('hotkeyInput').value = s.hotkey || 'Alt+Q';
   $('deepCheck').checked = deepMode;
-  $('deepWarn').classList.toggle('hidden', !deepMode);
+  $('deepWarn').classList.toggle('open', deepMode);
   updateIsland();
   updateModelLabel();
   // 首次启动:预填引导表单(若已有配置)并展示两步引导
@@ -81,7 +99,18 @@ function updateIsland() {
 $('deepCheck').onchange = () => {
   deepMode = $('deepCheck').checked;
   window.api.setDeepMode(deepMode).catch(() => {});
-  $('deepWarn').classList.toggle('hidden', !deepMode);
+  $('deepWarn').classList.toggle('open', deepMode);
+  // 提示展开期间逐帧钉住面板底部:内容随文字生长平滑上滑,文字自然浮入视野,
+  // 与过渡同时结束,避免 scrollHeight 未计入展开高度导致滚动落点偏差
+  if (deepMode) {
+    const p = $('islandPanel');
+    const t0 = performance.now();
+    const pinBottom = (t) => {
+      p.scrollTop = p.scrollHeight;
+      if (t - t0 < 400) requestAnimationFrame(pinBottom);
+    };
+    requestAnimationFrame(pinBottom);
+  }
   updateIsland();
 };
 
@@ -116,22 +145,43 @@ function detectMode(text) {
   return 'translate';
 }
 
-// 底部 meta 区的词典/翻译模式小标记
+// 底部 meta 区的词典/翻译模式小标记(两枚线性 SVG 切换,与全站图标同风格)
 function setModeBadge(isDict) {
-  $('modeIc').textContent = isDict ? '📖' : '⇄';
+  $('icDict').classList.toggle('hidden', !isDict);
+  $('icTrans').classList.toggle('hidden', isDict);
   $('modeText').textContent = isDict ? '词典' : '翻译';
   $('modeBadge').classList.remove('hidden');
 }
+
+// ---- 流式输出:主进程按 seq 推增量,40ms 节流渲染(每次全量 marked+DOMPurify,文本量小无压力) ----
+let streamBuf = '';
+let streamFlushTimer = null;
+
+function flushStream() {
+  streamFlushTimer = null;
+  if (streamBuf) {
+    setResultHtml(streamBuf);
+    $('resultDst').scrollTop = $('resultDst').scrollHeight; // 流式期间跟随滚到底部
+  }
+}
+
+window.api.onTranslateDelta(({ seq, delta }) => {
+  if (seq !== translateSeq) return; // 已有更新的请求,丢弃过期增量
+  streamBuf += delta;
+  if (!streamFlushTimer) streamFlushTimer = setTimeout(flushStream, 40);
+});
 
 async function runTranslate(sourceText) {
   if (sourceText !== undefined) input.value = sourceText; // 剪贴板/热键触发的直翻
   const text = input.value.trim();
   if (!text) return;
   const seq = ++translateSeq;
+  window.api.cancelTranslate(seq - 1); // 中止还在进行的旧流,别让它白烧 token
   const isDict = detectMode(text) === 'dict';
   const target = isDict ? 'zh-CN' : detectTarget(text); // 词典模式固定输出中文义项
   $('btnCopy').textContent = '复制';
-  $('resultDst').textContent = '翻译中…';
+  streamBuf = '';
+  setResultHtml('翻译中…');
   updateMeta('-- ms', '-- tokens');
   $('inputHint').classList.add('hidden');
   lastSourceText = text;
@@ -139,17 +189,189 @@ async function runTranslate(sourceText) {
   input.classList.add('shrunk');
   result.classList.remove('hidden');
   try {
-    const r = await window.api.translate({ text, target, mode: isDict ? 'dict' : 'translate' });
+    const r = await window.api.translate({ text, target, mode: isDict ? 'dict' : 'translate', seq });
     if (seq !== translateSeq) return; // 已有更新的请求,丢弃过期结果
     lastTranslation = r.translation || '';
-    $('resultDst').textContent = lastTranslation || '(无结果)';
+    setResultHtml(lastTranslation || '(无结果)');
     updateMeta(`${r.ms} ms`, `${r.tokens} tokens`);
+    updateTermWarn(r.termConflicts);
   } catch (err) {
     if (seq !== translateSeq) return;
     lastTranslation = '';
-    $('resultDst').textContent = '翻译失败:' + err.message;
+    setResultHtml('翻译失败:' + err.message);
   }
 }
+
+// ---- 术语表:管理弹窗 + 结果一键收录 + "译文未采用译名"冲突标记 ----
+let termsData = { enabled: true, channel: 'context', terms: [] };
+
+const CHANNEL_HINTS = {
+  context: '语境模式:命中的词条作为对照表交给模型,优先遵循但保留自然语感。',
+  strict: '严格模式:原文中的术语先替换为占位符,译文再还原成你的译名,结果确定不移。',
+};
+
+function updateChannelUI() {
+  document.querySelectorAll('.channel-opt').forEach((b) => {
+    b.classList.toggle('active', b.dataset.ch === termsData.channel);
+  });
+  $('termsChannelHint').textContent = CHANNEL_HINTS[termsData.channel] || '';
+}
+
+function renderTermList() {
+  const box = $('termList');
+  if (!termsData.terms.length) {
+    box.innerHTML = '<p class="hint">还没有术语。点下方"恢复预置包"或手动添加。</p>';
+    return;
+  }
+  box.innerHTML = termsData.terms.map((t) => `
+    <div class="t-row" data-id="${t.id}">
+      <input type="checkbox" class="t-on" ${t.enabled !== false ? 'checked' : ''} />
+      <span class="t-src">${escHtml(t.source)}</span>
+      <span class="cap-arrow">→</span>
+      <span class="t-dst">${escHtml(t.target)}</span>
+      <button class="t-del" title="删除">×</button>
+    </div>`).join('');
+}
+
+async function openTermsDialog() {
+  try { termsData = await window.api.getTerms(); } catch { /* 保持默认 */ }
+  $('termsEnabled').checked = termsData.enabled;
+  updateChannelUI();
+  renderTermList();
+  $('termsMsg').textContent = '';
+  $('termsDialog').showModal();
+  // 术语开关/通道/删除都是即时保存,只有新增术语的两个输入框受保护(未点击"添加"前别误关)
+  snapshotDialog($('termsDialog'), '#termNewSrc, #termNewDst');
+}
+
+$('btnOpenTerms').onclick = () => {
+  $('settingsDialog').close();
+  openTermsDialog();
+};
+$('btnTermsClose').onclick = () => $('termsDialog').close();
+
+$('termsEnabled').onchange = async () => {
+  termsData.enabled = $('termsEnabled').checked;
+  await window.api.setTermsConfig({ enabled: termsData.enabled }).catch(() => {});
+};
+
+document.querySelectorAll('.channel-opt').forEach((b) => {
+  b.onclick = async () => {
+    termsData.channel = b.dataset.ch;
+    updateChannelUI();
+    await window.api.setTermsConfig({ channel: termsData.channel }).catch(() => {});
+  };
+});
+
+$('btnTermAdd').onclick = async () => {
+  const src = $('termNewSrc').value.trim();
+  const dst = $('termNewDst').value.trim();
+  if (!src || !dst) {
+    $('termsMsg').textContent = '✗ 原文与译名都要填写';
+    $('termsMsg').className = 'validate-msg fail';
+    return;
+  }
+  try {
+    const r = await window.api.addTerm({ source: src, target: dst, desc: '' });
+    $('termNewSrc').value = '';
+    $('termNewDst').value = '';
+    termsData = await window.api.getTerms();
+    renderTermList();
+    $('termsMsg').textContent = r.updated ? '✓ 已更新同名条目' : '✓ 已添加';
+    $('termsMsg').className = 'validate-msg ok';
+  } catch (err) {
+    $('termsMsg').textContent = '✗ ' + err.message;
+    $('termsMsg').className = 'validate-msg fail';
+  }
+};
+
+$('termList').addEventListener('change', async (e) => {
+  if (!e.target.classList.contains('t-on')) return;
+  const id = e.target.closest('.t-row').dataset.id;
+  await window.api.toggleTerm({ id, enabled: e.target.checked }).catch(() => {});
+  const item = termsData.terms.find((x) => x.id === id);
+  if (item) item.enabled = e.target.checked;
+});
+
+$('termList').addEventListener('click', async (e) => {
+  const del = e.target.closest('.t-del');
+  if (!del) return;
+  const id = del.closest('.t-row').dataset.id;
+  await window.api.removeTerm(id).catch(() => {});
+  termsData.terms = termsData.terms.filter((x) => x.id !== id);
+  renderTermList();
+});
+
+$('btnTermsCsv').onclick = () => $('termsCsvFile').click();
+$('termsCsvFile').onchange = async () => {
+  const file = $('termsCsvFile').files[0];
+  if (!file) return;
+  try {
+    const r = await window.api.importTermsCsv(await file.text());
+    termsData = await window.api.getTerms();
+    renderTermList();
+    $('termsMsg').textContent = `✓ 导入完成:新增 ${r.added} 条,更新 ${r.updated} 条`;
+    $('termsMsg').className = 'validate-msg ok';
+  } catch (err) {
+    $('termsMsg').textContent = '✗ ' + err.message;
+    $('termsMsg').className = 'validate-msg fail';
+  }
+  $('termsCsvFile').value = '';
+};
+
+$('btnTermsPreset').onclick = async () => {
+  try {
+    const r = await window.api.restoreTermsPreset();
+    termsData = await window.api.getTerms();
+    renderTermList();
+    $('termsMsg').textContent = r.added ? `✓ 已补充预置术语 ${r.added} 条` : '✓ 预置术语已在表中,无新增';
+    $('termsMsg').className = 'validate-msg ok';
+  } catch (err) {
+    $('termsMsg').textContent = '✗ ' + err.message;
+    $('termsMsg').className = 'validate-msg fail';
+  }
+};
+
+// 冲突小标记:原文命中条目但译文没采用译名时点亮,点击进术语管理
+function updateTermWarn(conflicts) {
+  const warn = $('termWarn');
+  if (conflicts && conflicts.length) {
+    warn.title = '这些术语未按你的译名翻译:' + conflicts.join('、');
+    warn.classList.remove('hidden');
+  } else {
+    warn.classList.add('hidden');
+  }
+}
+$('termWarn').onclick = openTermsDialog;
+
+// 一键收录:默认把译文里选中的文字当译名,孤词原文自动填入
+$('btnTerm').onclick = () => {
+  const sel = String(window.getSelection() || '').trim();
+  const src = detectMode(input.value.trim()) === 'dict' ? input.value.trim() : '';
+  $('capSrc').value = src;
+  $('capDst').value = sel;
+  $('capDesc').value = '';
+  $('termCapture').classList.remove('hidden');
+  (src ? $('capDst') : $('capSrc')).focus();
+};
+$('capCancel').onclick = () => $('termCapture').classList.add('hidden');
+$('capSave').onclick = async () => {
+  const src = $('capSrc').value.trim();
+  const dst = $('capDst').value.trim();
+  if (!src || !dst) {
+    $('btnTerm').textContent = '两栏都填';
+    setTimeout(() => { $('btnTerm').textContent = '＋术语'; }, 1500);
+    return;
+  }
+  try {
+    const r = await window.api.addTerm({ source: src, target: dst, desc: $('capDesc').value.trim() });
+    $('termCapture').classList.add('hidden');
+    $('btnTerm').textContent = r.updated ? '已更新 ✓' : '已收录 ✓';
+  } catch (err) {
+    $('btnTerm').textContent = '收录失败';
+  }
+  setTimeout(() => { $('btnTerm').textContent = '＋术语'; }, 1500);
+};
 
 input.addEventListener('keydown', (e) => {
   // isComposing:中文输入法选词回车不应触发翻译
@@ -182,9 +404,12 @@ function reset() {
   updateMeta('-- ms', '-- tokens');
   $('inputHint').classList.remove('hidden');
   $('modeBadge').classList.add('hidden');
+  $('termWarn').classList.add('hidden');
+  $('termCapture').classList.add('hidden');
   lastTranslation = '';
   lastSourceText = '';
-  translateSeq++; // 使进行中的旧请求结果作废
+  window.api.cancelTranslate(translateSeq); // 先中止正在跑的旧流(seq 是它发起时的值)
+  translateSeq++; // 再使其结果作废
 }
 
 // ---- 剪贴板监听(复制即翻):主进程轮询到外部新内容后推送过来 ----
@@ -202,12 +427,20 @@ window.api.onClipboardChanged(({ text, source }) => {
   runTranslate();
 });
 
-// 双击结果区或按 Esc 回到输入模式
+// 双击结果区或按 Esc 回到输入模式;单击链接在系统浏览器打开(不劫持窗口)
+result.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('a');
+  if (a && a.href) {
+    e.preventDefault();
+    window.api.openExternal(a.href).catch(() => {});
+  }
+});
 result.addEventListener('dblclick', reset);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('settingsDialog').open) {
-      $('settingsDialog').close();
+    const open = document.querySelector('dialog[open]');
+    if (open) {
+      open.close(); // Esc 优先关掉最上层弹窗
     } else {
       reset();
     }
@@ -215,9 +448,143 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---- 历史记录:点击条目回看,条目内复译/复制/删除;翻译成功由主进程自动落盘 ----
+let histCache = [];
+let clearArmed = null;
+
+function fmtTime(t) {
+  const d = new Date(t);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s ?? '');
+  return d.innerHTML;
+}
+
+function renderHistory() {
+  const box = $('histList');
+  if (!histCache.length) {
+    box.innerHTML = '<p class="hint">还没有记录。</p>';
+    return;
+  }
+  box.innerHTML = histCache.map((it) => `
+    <div class="h-item" data-id="${it.id}">
+      <div class="h-head">
+        <span class="h-time">${fmtTime(it.time)}</span>
+        <span class="h-mode">${it.mode === 'dict' ? '词典' : '翻译'}</span>
+        <span class="h-acts">
+          <button data-act="retry">复译</button>
+          <button data-act="copy">复制</button>
+          <button data-act="del">×</button>
+        </span>
+      </div>
+      <div class="h-src">${escHtml(it.text)}</div>
+      <div class="h-dst">${escHtml(it.translation)}</div>
+    </div>`).join('');
+}
+
+// 把一条历史载入主界面(回看);进行中的翻译流先作废,避免覆盖回看内容
+function reviewItem(it) {
+  window.api.cancelTranslate(translateSeq);
+  translateSeq++;
+  input.value = it.text || '';
+  input.classList.add('shrunk');
+  result.classList.remove('hidden');
+  $('inputHint').classList.add('hidden');
+  $('termWarn').classList.add('hidden');
+  $('termCapture').classList.add('hidden');
+  setModeBadge(it.mode === 'dict');
+  lastTranslation = it.translation || '';
+  lastSourceText = it.text || '';
+  setResultHtml(lastTranslation || '(无结果)');
+  updateMeta(`${it.ms || '--'} ms`, `${it.tokens || '--'} tokens`);
+  $('btnCopy').textContent = '复制';
+}
+
+$('btnHistory').onclick = async () => {
+  try { histCache = await window.api.listHistory(); } catch { histCache = []; }
+  renderHistory();
+  $('historyDialog').showModal();
+  snapshotDialog($('historyDialog'), ''); // 无输入控件,点空白随时可关
+};
+$('btnHistClose').onclick = () => $('historyDialog').close();
+$('btnHistClear').onclick = async () => {
+  // 两击确认,避免误触直接清空全部
+  if (!clearArmed) {
+    $('btnHistClear').textContent = '确认清空?';
+    clearArmed = setTimeout(() => {
+      $('btnHistClear').textContent = '清空';
+      clearArmed = null;
+    }, 3000);
+    return;
+  }
+  clearTimeout(clearArmed);
+  clearArmed = null;
+  $('btnHistClear').textContent = '清空';
+  await window.api.clearHistory();
+  histCache = [];
+  renderHistory();
+};
+
+$('histList').addEventListener('click', async (e) => {
+  const item = e.target.closest('.h-item');
+  if (!item) return;
+  const it = histCache.find((x) => x.id === item.dataset.id);
+  if (!it) return;
+  const btn = e.target.closest('button');
+  if (!btn) {
+    $('historyDialog').close();
+    reviewItem(it);
+    return;
+  }
+  if (btn.dataset.act === 'del') {
+    await window.api.deleteHistory(it.id);
+    histCache = histCache.filter((x) => x.id !== it.id);
+    renderHistory();
+  } else if (btn.dataset.act === 'copy') {
+    if (!it.translation) return;
+    await window.api.copyText(it.translation);
+    btn.textContent = '已复制 ✓';
+    setTimeout(() => { btn.textContent = '复制'; }, 1200);
+  } else if (btn.dataset.act === 'retry') {
+    $('historyDialog').close();
+    input.value = it.text || '';
+    runTranslate();
+  }
+});
+
 // ---- 设置弹窗(点击底部模型名打开)----
-$('btnModel').onclick = () => $('settingsDialog').showModal();
+$('btnModel').onclick = () => {
+  $('settingsDialog').showModal();
+  snapshotDialog($('settingsDialog'));
+};
 $('btnCancel').onclick = () => $('settingsDialog').close();
+
+// ---- 弹窗点空白自动关闭:打开时快照"未保存改动"范围,点击遮罩且无改动才关闭 ----
+// guardSel:受保护控件(改动未保存/会丢失);不传则全弹窗控件受保护,传 '' 表示随时可点空白关闭
+const dlgDirty = new WeakMap(); // dialog -> () => boolean
+function snapshotDialog(dlg, guardSel) {
+  const sel = guardSel || 'input:not([type="file"]):not([type="hidden"]), select, textarea';
+  const read = () => [...dlg.querySelectorAll(sel)]
+    .map((el) => (el.type === 'checkbox' ? el.checked : el.value)).join('\u0001');
+  const base = read();
+  dlgDirty.set(dlg, guardSel === '' ? null : () => read() !== base);
+}
+function bindBackdropDismiss(dlg) {
+  dlg.addEventListener('click', (e) => {
+    if (e.target !== dlg) return; // 只处理点在弹窗自身(遮罩/留白)上的点击
+    const r = dlg.getBoundingClientRect();
+    if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return;
+    if (dlgDirty.get(dlg)?.()) return; // 有未保存改动:留给保存/取消,不误关
+    dlg.close();
+  });
+}
+bindBackdropDismiss($('settingsDialog'));
+bindBackdropDismiss($('termsDialog'));
+bindBackdropDismiss($('historyDialog'));
 
 // 复制即翻开关:改动立即生效
 $('clipWatchCheck').onchange = () => {
@@ -286,7 +653,8 @@ let tintHold = null;
 function startTintHold(delta) {
   stopTintHold();
   setTint(currentTint + delta * 0.05);
-  tintHold = setInterval(() => setTint(currentTint + delta * 0.005), 50);
+  // 步长必须落在 setTint 的 1% 取整网格上:此前 0.5%/50ms 的半格步长会被取整吞掉,长按纹丝不动
+  tintHold = setInterval(() => setTint(currentTint + delta * 0.01), 100);
 }
 function stopTintHold() {
   if (tintHold) {

@@ -1,0 +1,25 @@
+appId: com.frostultra.frostmirror
+productName: FrostMirror
+directories:
+  output: release
+  buildResources: assets
+files:
+  - main.js
+  - preload.js
+  - renderer.js
+  - stream.js
+  - terms-core.js
+  - index.html
+  - style.css
+  - package.json
+  - assets/**
+asarUnpack:
+  - "**/node_modules/koffi/**"
+win:
+  icon: assets/icon.ico
+  target:
+    - target: portable
+      arch:
+        - x64
+portable:
+  artifactName: FrostMirror-${version}-portable.exe
