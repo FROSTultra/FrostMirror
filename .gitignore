@@ -4,5 +4,5 @@ settings.json
 history.json
 terms.json
 dist/
-release/
 .test-md.log
+release/

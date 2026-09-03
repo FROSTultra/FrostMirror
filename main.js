@@ -5,15 +5,16 @@ const koffi = require('koffi');
 const { streamChatCompletion } = require('./stream');
 const { buildTermRegex, findTermHits, parseCsv } = require('./terms-core');
 
-// 便携软件路线:不写用户 C 盘。
-// 打包后:配置存在 exe 旁边(便携 exe 取 PORTABLE_EXECUTABLE_DIR,zip 版取 exe 所在目录);
-// 开发模式(未打包):配置在项目根目录,方便查看修改。
-const PORTABLE_DIR = process.env.PORTABLE_EXECUTABLE_DIR
-  || (app.isPackaged ? path.dirname(app.getPath('exe')) : '');
+// 配置放在系统用户目录(%APPDATA%\FrostMirror):与 exe 位置彻底解耦,
+// 用户把便携版挪到任何文件夹都不会丢配置/重填设置。
+// 开发模式(未打包):配置仍在项目根目录,方便查看修改。
+const DATA_DIR = app.isPackaged
+  ? path.join(app.getPath('appData'), 'FrostMirror')
+  : __dirname;
 
-const SETTINGS_FILE = path.join(PORTABLE_DIR || __dirname, 'settings.json');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
-// 历史记录:与 settings.json 同目录(便携=exe 旁),最新在前,超过 200 条裁掉最旧
+// 历史记录:与 settings.json 同目录,最新在前,超过 200 条裁掉最旧
 const HISTORY_FILE = path.join(path.dirname(SETTINGS_FILE), 'history.json');
 const HISTORY_LIMIT = 200;
 
@@ -61,9 +62,37 @@ function termId() {
   return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-if (PORTABLE_DIR) {
-  // Chromium 的缓存/存储也搬到 exe 旁的 glass-data,彻底不占用 C 盘
-  app.setPath('userData', path.join(PORTABLE_DIR, 'glass-data'));
+// ---- 旧版本数据迁移 ----
+// 之前的便携版把配置写在 exe 旁边:换文件夹就会出现一份"新配置"。
+// 打包版首次运行(新目录还没有配置时)把 exe 旁的 settings/terms/history 和 glass-data 挪过来,
+// 老用户升级后不用重填;dev 模式配置本来就在项目根目录,跳过。
+function migrateLegacyData() {
+  if (!app.isPackaged) return;
+  if (fs.existsSync(SETTINGS_FILE)) return; // 已有新配置,不迁移
+  const legacyDir = path.dirname(app.getPath('exe'));
+  if (legacyDir === DATA_DIR) return;
+  const legacy = path.join(legacyDir, 'glass-data');
+  if (!fs.existsSync(legacy) && !fs.existsSync(path.join(legacyDir, 'settings.json'))) return;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    for (const name of ['settings.json', 'terms.json', 'history.json']) {
+      const src = path.join(legacyDir, name);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(DATA_DIR, name));
+    }
+    if (fs.existsSync(legacy)) {
+      fs.cpSync(legacy, path.join(DATA_DIR, 'glass-data'), { recursive: true, errorOnExist: false });
+    }
+    console.log('[frost-mirror] 已从 exe 旁迁移旧配置到', DATA_DIR);
+  } catch (e) {
+    console.log('[frost-mirror] 旧配置迁移失败(不影响继续运行):', e.message);
+  }
+}
+
+migrateLegacyData();
+
+// 缓存也放进同一目录,避免散落;dev 模式保持默认(项目根的 glass-data 会污染仓库)
+if (app.isPackaged) {
+  app.setPath('userData', path.join(DATA_DIR, 'glass-data'));
 }
 
 let win = null;

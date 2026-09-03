@@ -1,8 +1,12 @@
+### 注意，外侧文件夹用于开发，几个以github-开头的文件夹是用来整理开发好的文件后推送的，开发时不要碰这两个文件夹
+
+
+
 # FrostMirror · 镜语
 
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 
-置顶毛玻璃 AI 翻译小窗  · 译如照镜
+置顶毛玻璃 AI 翻译小窗 · 译如照镜
 
 一个始终浮在窗口最前面的半透明翻译小窗——复制即翻、输入即译、孤词词典，随叫随到。适合阅读外文资料、写英文邮件时随手一翻。
 
@@ -36,7 +40,7 @@
 
 - **置顶毛玻璃** — Win32 亚克力模糊,始终浮于所有窗口上方,不遮挡阅读
 - **本地加密** — API Key 用 Windows DPAPI 加密存储,不落明文
-- **便携免安装** — 配置存 exe 旁 `settings.json`,缓存存 `glass-data/`,不写 C 盘
+- **便携免安装** — 免安装、双击即用;配置存系统用户目录(`%APPDATA%\FrostMirror\`),挪动 exe 到任意文件夹不会丢设置。首次运行会自动把旧版留在 exe 旁的配置迁移过来
 - **单实例** — 重复启动只聚焦已有窗口
 
 ## 界面预览
@@ -103,7 +107,7 @@ token,令牌,大模型处理的文本基本单位,false
 - **翻译接口**:OpenAI 兼容 `/chat/completions`,主进程发请求无 CORS 问题;SSE 流式解析(40ms 节流),`stream_options.include_usage` 精确统计 token,思考流丢弃;默认关闭 `thinking`(翻译不需要思考,避免拖慢),深度模式开启并降推理强度;不认参数的服务端自动去参重试
 - **术语匹配**:双通道——语境软约束(默认,提示模型优先采用译名)与严格占位符保护(翻译前替换为占位符、结束后还原,保证译名不被改);全词匹配,兼容英文复数
 - **安全**:API Key 用 Electron `safeStorage`(Windows DPAPI)加密;AI 输出视为不可信输入,经 DOMPurify 消毒后再渲染;渲染库本地存放 `assets/vendor/`,离线可用
-- **便携**:配置存 exe 旁 `settings.json`,缓存存 `glass-data/`,不写 C 盘;DPAPI 密文绑定原账户,换电脑后需重新填写 API Key
+- **便携**:免安装、数据存 `%APPDATA%\FrostMirror\`(exe 挪动不丢配置;旧版 exe 旁配置首次运行自动迁移);DPAPI 密文绑定原账户,换电脑后需重新填写 API Key
 
 ## 开源依赖
 
