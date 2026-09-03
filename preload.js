@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
   setDeepMode: (v) => ipcRenderer.invoke('settings:set-deep-mode', v),
   setClipWatch: (v) => ipcRenderer.invoke('settings:set-clip-watch', v),
   setHotkey: (v) => ipcRenderer.invoke('settings:set-hotkey', v),
+  getDataDir: () => ipcRenderer.invoke('settings:get-data-dir'),
+  setDataDir: (mode) => ipcRenderer.invoke('settings:set-data-dir', mode),
   onClipboardChanged: (cb) => ipcRenderer.on('clipboard:changed', (_e, payload) => cb(payload)),
   translate: (p) => ipcRenderer.invoke('translate:run', p),
   cancelTranslate: (seq) => ipcRenderer.invoke('translate:cancel', seq),

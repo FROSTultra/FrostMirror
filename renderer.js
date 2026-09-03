@@ -57,11 +57,83 @@ window.api.getSettings().then((s) => {
   ob.model.value = s.model || '';
   ob.apiKey.value = s.apiKey || '';
   if (!s.onboarded) $('onboarding').classList.remove('hidden');
+  // 数据存储位置选择器的初始高亮与提示
+  refreshStoragePickers().catch(() => {});
 }).catch((e) => console.log('[frost-mirror] 读取配置失败:', e));
 
 function updateModelLabel() {
   $('btnModel').textContent = $('settingsForm').model.value.trim() || '未配置模型';
 }
+
+// ---- 数据存储位置选择(首次告知弹窗 + 设置弹窗共用同一逻辑) ----
+const noticeDialog = $('noticeDialog');
+let noticePending = false;
+function showDataDirNotice() {
+  if (noticeDialog.open) return;
+  noticePending = true;
+  // 等设置弹窗先关掉(节省的 setTimeout 关闭时机可能竞态),避免两个弹窗叠在一起
+  setTimeout(openPendingNotice, 850);
+}
+async function openPendingNotice() {
+  if (!noticePending) return;
+  const settingsDlg = $('settingsDialog');
+  if (settingsDlg.open) {
+    settingsDlg.addEventListener('close', () => openPendingNotice(), { once: true });
+    return; // 设置弹窗还开着,等它 close 再弹
+  }
+  noticePending = false;
+  byId('storagePickerNotice').classList.remove('hidden');
+  await refreshStoragePickers();
+  noticeDialog.showModal();
+}
+
+function byId(id) { return document.getElementById(id); }
+
+// 数据目录选择器:点击选项立即切换(主进程迁移数据),渲染层保持高亮与现状一致
+async function storageSelect(mode, pickerId, hintId) {
+  const r = await window.api.setDataDir(mode);
+  if (r.ok) {
+    await refreshStoragePickers();
+  } else {
+    const msg = byId(hintId);
+    msg.textContent = '✗ 切换失败:' + r.error;
+    msg.classList.add('fail');
+    await refreshStoragePickers();
+  }
+}
+
+async function refreshStoragePickers() {
+  const info = await window.api.getDataDir();
+  for (const pickerId of ['storagePickerNotice', 'storagePickerSettings']) {
+    const picker = byId(pickerId);
+    if (!picker) continue;
+    for (const b of picker.querySelectorAll('[data-storage]')) {
+      b.classList.toggle('active', b.dataset.storage === info.mode);
+      b.disabled = info.mode === 'dev';
+    }
+  }
+  for (const hintId of ['storageHintNotice', 'storageHintSettings']) {
+    const hint = byId(hintId);
+    if (!hint) continue;
+    const cur = info.mode === 'portable' ? '程序目录(便携)' : info.mode === 'appdata' ? '系统用户目录' : '开发模式';
+    hint.textContent = info.mode === 'dev'
+      ? '开发模式(未打包):数据固定存项目目录,忽略此设置。'
+      : `当前:${cur} → ${info.dataDir}`;
+    hint.classList.remove('fail');
+  }
+}
+
+// 两个入口(通知弹窗 + 设置弹窗)共用一份绑定,setDataDir 主进程负责迁移与标志。
+// 注意后续新增入口时同步补充 DOM id。
+for (const [pickerId, hintId] of [['storagePickerNotice', 'storageHintNotice'], ['storagePickerSettings', 'storageHintSettings']]) {
+  const picker = byId(pickerId);
+  if (!picker) continue;
+  for (const btn of picker.querySelectorAll('[data-storage]')) {
+    btn.addEventListener('click', () => storageSelect(btn.dataset.storage, pickerId, hintId));
+  }
+}
+
+$('btnNotice').addEventListener('click', () => noticeDialog.close());
 
 // ---- 顶栏:红绿灯 + 图钉 ----
 $('btnClose').onclick = () => window.api.close();
@@ -591,27 +663,91 @@ $('clipWatchCheck').onchange = () => {
   window.api.setClipWatch($('clipWatchCheck').checked).catch(() => {});
 };
 
-// 全局热键:失焦即保存并重新注册,注册失败提示;回车等同失焦(不触发表单提交)
-$('hotkeyInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    e.target.blur();
-  }
+// 全局热键:聚焦后直接按组合键,即时捕获显示并保存(如按 Alt+O 即显示 Alt+O);
+// 不再要求手输 accelerator。退格/删除清空停用,Esc 恢复未捕获状态。
+const hotkeyInput = $('hotkeyInput');
+hotkeyInput.addEventListener('focus', () => {
+  hotkeyInput.dataset.prev = hotkeyInput.value;
 });
-$('hotkeyInput').addEventListener('change', async () => {
-  const accel = $('hotkeyInput').value.trim();
+hotkeyInput.addEventListener('keydown', (e) => {
+  // 纯功能键(修饰键/Shift/Ctrl/Alt)不构成组合,等待下一个键
+  const MOD = ['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'NumLock', 'ScrollLock'];
+  if (MOD.includes(e.key)) {
+    e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation(); // 防止 Esc 触发全局"关弹窗/重置"
+  const msg = $('hotkeyMsg');
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    hotkeyInput.value = '';
+    saveHotkey('');
+    msg.textContent = '✓ 已停用全局热键';
+    msg.className = 'validate-msg ok';
+    return;
+  }
+  if (e.key === 'Escape') {
+    hotkeyInput.value = hotkeyInput.dataset.prev || '';
+    hotkeyInput.blur();
+    return;
+  }
+  const accel = buildAccel(e);
+  if (!accel) {
+    msg.textContent = '✗ 请同时按 Ctrl / Alt / Shift 之一与一个字符键';
+    msg.className = 'validate-msg fail';
+    return;
+  }
+  hotkeyInput.value = accel;
+  saveHotkey(accel);
+  msg.textContent = `✓ 已捕获 ${accel}`;
+  msg.className = 'validate-msg ok';
+});
+
+// 把键盘事件转成 accelerator 字符串:修饰键在前,主键规范化(如 Alt+O、Ctrl+Shift+A、F5)
+function buildAccel(e) {
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+  let key = '';
+  const k = e.key;
+  if (/^[a-z]$/i.test(k)) key = k.toUpperCase();
+  else if (/^[0-9]$/.test(k)) key = k;
+  else if (/^F([1-9]|1[0-9]|2[0-4])$/i.test(k)) key = k.toUpperCase();
+  else if (k === ' ') key = 'Space';
+  else if (k === 'Tab') key = 'Tab';
+  else if (k === 'Enter') key = 'Enter';
+  else if (k === 'ArrowUp') key = 'Up';
+  else if (k === 'ArrowDown') key = 'Down';
+  else if (k === 'ArrowLeft') key = 'Left';
+  else if (k === 'ArrowRight') key = 'Right';
+  else if (k === 'Home') key = 'Home';
+  else if (k === 'End') key = 'End';
+  else if (k === 'PageUp') key = 'PageUp';
+  else if (k === 'PageDown') key = 'PageDown';
+  else if (k === 'Insert') key = 'Insert';
+  else if (k === 'Delete') key = 'Delete';
+  else if (k && k.length === 1) key = k.toUpperCase(); // 其他单字符(符号等)
+  else return '';
+  // 主键必须带至少一个修饰键,避免纯字母键误触发
+  if (!mods.length) return '';
+  return [...mods, key].join('+');
+}
+
+async function saveHotkey(accel) {
   const msg = $('hotkeyMsg');
   try {
     const ok = await window.api.setHotkey(accel);
-    msg.textContent = ok
-      ? (accel ? `✓ 已注册 ${accel}` : '✓ 已停用全局热键')
-      : `✗ 注册失败:${accel} 可能被其他程序占用`;
-    msg.className = ok ? 'validate-msg ok' : 'validate-msg fail';
+    if (!ok) {
+      msg.textContent = `✗ 注册失败:${accel} 可能被其他程序占用`;
+      msg.className = 'validate-msg fail';
+    }
   } catch (err) {
     msg.textContent = '✗ ' + err.message;
     msg.className = 'validate-msg fail';
   }
-});
+}
 
 $('settingsForm').onsubmit = async (e) => {
   e.preventDefault();
@@ -626,11 +762,12 @@ $('settingsForm').onsubmit = async (e) => {
   msg.className = 'validate-msg';
   try {
     await window.api.validateSettings(s);
-    await window.api.saveSettings(s);
+    const saved = await window.api.saveSettings(s);
     configured = true;
     msg.textContent = '✓ 连接成功,已保存';
     msg.className = 'validate-msg ok';
     updateModelLabel();
+    if (saved?.firstConfig) showDataDirNotice();
     setTimeout(() => $('settingsDialog').close(), 800);
   } catch (err) {
     msg.textContent = '✗ ' + err.message;
@@ -702,11 +839,17 @@ $('obForm').onsubmit = async (e) => {
   msg.className = 'validate-msg';
   try {
     await window.api.validateSettings(s);
-    await window.api.saveSettings(s);
+    const saved = await window.api.saveSettings(s);
     configured = true;
     msg.textContent = '✓ 连接成功,开始使用';
     msg.className = 'validate-msg ok';
+    // 引导表单与设置弹窗是两个表单:同步过去,标签立刻显示模型名(否则要重启才出现)
+    const sf = $('settingsForm');
+    sf.baseUrl.value = s.baseUrl;
+    sf.model.value = s.model;
+    sf.apiKey.value = s.apiKey;
     updateModelLabel();
+    if (saved?.firstConfig) showDataDirNotice();
     setTimeout(() => $('onboarding').classList.add('hidden'), 700);
   } catch (err) {
     msg.textContent = '✗ ' + err.message;

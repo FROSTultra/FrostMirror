@@ -203,10 +203,23 @@
         <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
         <input type="checkbox" id="clipWatchCheck" />
       </label>
-      <button type="button" class="mini-btn wide" id="btnOpenTerms">管理术语表…</button>
-      <label>全局热键(任意应用呼出窗口,accelerator 格式)
-        <input id="hotkeyInput" placeholder="Alt+Q" />
+      <label class="deep-row storage-row">
+        <span class="deep-name">数据存储位置<span class="deep-desc">配置 · 历史 · 术语表</span></span>
       </label>
+      <div class="term-channels" id="storagePickerSettings">
+        <button type="button" class="channel-opt" data-storage="appdata">
+          系统用户目录<span>挪动程序不丢设置</span>
+        </button>
+        <button type="button" class="channel-opt" data-storage="portable">
+          程序目录(便携)<span>数据跟 exe 走</span>
+        </button>
+      </div>
+      <p class="hint" id="storageHintSettings"></p>
+      <button type="button" class="mini-btn wide" id="btnOpenTerms">管理术语表…</button>
+      <label>全局热键(点击后直接按组合键,如 Alt+O)
+        <input id="hotkeyInput" placeholder="点击此处,按下组合键…" readonly />
+      </label>
+      <p class="hint">退格 / Delete 清空停用;Esc 放弃修改。</p>
       <p class="validate-msg" id="hotkeyMsg"></p>
       <div class="dialog-actions">
         <button type="submit" id="btnSave">保存并验证</button>
@@ -214,6 +227,25 @@
       </div>
       <p class="validate-msg" id="validateMsg"></p>
     </form>
+  </dialog>
+
+  <!-- 首次配置完成的告知弹窗:让用户自己选数据存放位置,选中即迁移;只弹一次 -->
+  <dialog id="noticeDialog">
+    <h2>配置已保存</h2>
+    <p class="hint">设置(含 API Key)、翻译记录与术语表存放在哪里,由你选择:选中后立即迁移,之后可在"设置"弹窗中随时更改。</p>
+    <div class="term-channels" id="storagePickerNotice">
+      <button type="button" class="channel-opt" data-storage="appdata">
+        系统用户目录<span>推荐 · 挪动程序不丢设置</span>
+      </button>
+      <button type="button" class="channel-opt" data-storage="portable">
+        程序目录(便携)<span>数据跟 exe 走</span>
+      </button>
+    </div>
+    <p class="hint" id="storageHintNotice"></p>
+    <p class="hint">API Key 用 Windows 系统加密存储,不落明文;换电脑或换 Windows 账户后需重新填写。</p>
+    <div class="dialog-actions">
+      <button type="button" id="btnNotice">确定</button>
+    </div>
   </dialog>
 
   <!-- 首次启动引导:两步玻璃小卡(介绍 → 配置),完成后不再出现 -->

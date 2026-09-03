@@ -198,6 +198,10 @@ body {
 }
 .deep-row input:checked { background: #2f6fed; }
 .deep-row input:checked::after { left: 16px; }
+/* 数据存储位置行:纯文字行,与术语表选项共用 channel-opt 外观 */
+.storage-row { cursor: default; }
+.storage-row .deep-name { pointer-events: none; }
+.hint.fail { color: #ff8f8f; }
 /* 深度模式风险提示:始终在布局内,展开/收起双向过渡,避免 display 切换的瞬间跳变 */
 .deep-warn {
   font-size: 11px;
@@ -541,6 +545,20 @@ form input {
   padding: 7px 10px; font-size: 13px; outline: none;
 }
 .hint { font-size: 11px; color: rgba(232, 234, 237, 0.5); margin-top: 10px; }
+/* 首次配置完成的告知弹窗:居中展示数据目录路径,不抢用户焦点 */
+#noticeDialog {
+  top: 50%; left: 50%;
+  transform: translate(-50%, -46%);
+  max-height: none;
+  width: min(340px, calc(100vw - 40px));
+}
+#noticeDialog[open] { animation: notice-in 0.25s cubic-bezier(0.2, 0.9, 0.3, 1); }
+@keyframes notice-in {
+  from { opacity: 0; transform: translate(-50%, -40%); }
+  to { opacity: 1; transform: translate(-50%, -46%); }
+}
+#noticeDialog::backdrop { background: rgba(35, 37, 40, 0.35); }
+#noticeDialog .dialog-actions { margin-top: 12px; }
 .dialog-actions { display: flex; gap: 8px; margin-top: 14px; }
 .dialog-actions button {
   flex: 1; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 13px;
@@ -600,14 +618,29 @@ form input {
 .ob-primary {
   background: #2f6fed; border: none; color: #fff;
   padding: 9px 16px; border-radius: 8px; font-size: 13px; cursor: pointer;
-  margin-top: 8px;
 }
 .ob-primary:hover { filter: brightness(1.08); }
+/* 介绍页的主按钮居中显示("不要靠左") */
+#obNext {
+  display: block;
+  margin: 18px auto 4px;
+  padding: 10px 28px;
+}
 .ob-back {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: #e8eaed;
   padding: 9px 16px; border-radius: 8px; font-size: 13px; cursor: pointer;
+}
+.ob-back:hover { background: rgba(255, 255, 255, 0.14); }
+/* 引导第二步两个按钮等高(flex 已拉伸宽度,统一高度与内边距消除视觉差) */
+.ob-card .dialog-actions .ob-primary,
+.ob-card .dialog-actions .ob-back {
+  height: 38px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .ob-card form label { display: block; font-size: 12px; margin-top: 8px; color: rgba(232, 234, 237, 0.7); }
 .ob-card form input {

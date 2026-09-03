@@ -5,17 +5,53 @@ const koffi = require('koffi');
 const { streamChatCompletion } = require('./stream');
 const { buildTermRegex, findTermHits, parseCsv } = require('./terms-core');
 
-// 配置放在系统用户目录(%APPDATA%\FrostMirror):与 exe 位置彻底解耦,
-// 用户把便携版挪到任何文件夹都不会丢配置/重填设置。
-// 开发模式(未打包):配置仍在项目根目录,方便查看修改。
-const DATA_DIR = app.isPackaged
-  ? path.join(app.getPath('appData'), 'FrostMirror')
-  : __dirname;
+// 数据存储位置:
+// - 打包版默认 %APPDATA%\FrostMirror(与 exe 位置解耦,挪动不丢配置);
+// - exe 旁存在 portable.flag 时切为"数据跟 exe 走"(便携模式),由设置弹窗
+//   "数据存储位置"切换,切换时自动迁移已有配置与缓存;
+// - 开发模式(未打包)固定项目根目录,不参与切换。
+const EXE_DIR = app.isPackaged ? path.dirname(app.getPath('exe')) : '';
+const APP_DATA_DIR = path.join(app.getPath('appData'), 'FrostMirror');
+const PORTABLE_FLAG = EXE_DIR ? path.join(EXE_DIR, 'portable.flag') : '';
 
-const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+function resolveDataDir() {
+  if (!app.isPackaged) return __dirname;
+  return fs.existsSync(PORTABLE_FLAG) ? EXE_DIR : APP_DATA_DIR;
+}
 
-// 历史记录:与 settings.json 同目录,最新在前,超过 200 条裁掉最旧
-const HISTORY_FILE = path.join(path.dirname(SETTINGS_FILE), 'history.json');
+let DATA_DIR = resolveDataDir();
+let SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+let HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+let TERMS_FILE = path.join(DATA_DIR, 'terms.json');
+
+function refreshPaths() {
+  SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+  HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+  TERMS_FILE = path.join(DATA_DIR, 'terms.json');
+}
+
+// 切换数据目录:把当前数据复制到目标(覆盖目标侧旧副本),更新便携标志并重指路径。
+function switchDataDir(mode) {
+  if (!app.isPackaged) throw new Error('开发模式固定使用项目目录');
+  const target = mode === 'portable'
+    ? EXE_DIR
+    : APP_DATA_DIR;
+  if (target === DATA_DIR) return false;
+  fs.mkdirSync(target, { recursive: true });
+  for (const name of ['settings.json', 'terms.json', 'history.json']) {
+    const src = path.join(DATA_DIR, name);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(target, name));
+  }
+  const srcCache = path.join(DATA_DIR, 'glass-data');
+  if (fs.existsSync(srcCache)) copyRecursive(srcCache, path.join(target, 'glass-data'));
+  if (mode === 'portable') fs.writeFileSync(PORTABLE_FLAG, '');
+  else fs.rmSync(PORTABLE_FLAG, { force: true });
+  DATA_DIR = target;
+  refreshPaths();
+  if (app.isPackaged) app.setPath('userData', path.join(DATA_DIR, 'glass-data'));
+  return true;
+}
+
 const HISTORY_LIMIT = 200;
 
 function loadHistory() {
@@ -38,7 +74,6 @@ function addHistory(entry) {
 }
 
 // ---- 术语表:与 settings.json 同目录 terms.json;双通道(语境=提示词软约束,默认 / 严格=占位符保护) ----
-const TERMS_FILE = path.join(path.dirname(SETTINGS_FILE), 'terms.json');
 const PRESET_FILE = path.join(__dirname, 'assets', 'terms-preset.json');
 
 function loadTerms() {
@@ -66,22 +101,38 @@ function termId() {
 // 之前的便携版把配置写在 exe 旁边:换文件夹就会出现一份"新配置"。
 // 打包版首次运行(新目录还没有配置时)把 exe 旁的 settings/terms/history 和 glass-data 挪过来,
 // 老用户升级后不用重填;dev 模式配置本来就在项目根目录,跳过。
+// 不用 fs.cpSync:它走 native 拷贝,在此 Windows/Node 组合下有偶发崩溃;逐文件复制也更抗中断。
+function copyRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, entry.name);
+    const to = path.join(dest, entry.name);
+    if (entry.isDirectory()) copyRecursive(from, to);
+    else fs.copyFileSync(from, to);
+  }
+}
+
 function migrateLegacyData() {
   if (!app.isPackaged) return;
-  if (fs.existsSync(SETTINGS_FILE)) return; // 已有新配置,不迁移
+  const marker = path.join(DATA_DIR, '.migrated');
+  if (fs.existsSync(marker)) return; // 已完成过迁移
   const legacyDir = path.dirname(app.getPath('exe'));
   if (legacyDir === DATA_DIR) return;
   const legacy = path.join(legacyDir, 'glass-data');
-  if (!fs.existsSync(legacy) && !fs.existsSync(path.join(legacyDir, 'settings.json'))) return;
+  const hasOldConfig = fs.existsSync(path.join(legacyDir, 'settings.json'))
+    || fs.existsSync(legacy)
+    || fs.existsSync(path.join(legacyDir, 'terms.json'))
+    || fs.existsSync(path.join(legacyDir, 'history.json'));
+  if (!hasOldConfig) return;
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     for (const name of ['settings.json', 'terms.json', 'history.json']) {
       const src = path.join(legacyDir, name);
-      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(DATA_DIR, name));
+      const dst = path.join(DATA_DIR, name);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
     }
-    if (fs.existsSync(legacy)) {
-      fs.cpSync(legacy, path.join(DATA_DIR, 'glass-data'), { recursive: true, errorOnExist: false });
-    }
+    if (fs.existsSync(legacy)) copyRecursive(legacy, path.join(DATA_DIR, 'glass-data'));
+    fs.writeFileSync(marker, String(Date.now())); // 写完成标记:中断过的迁移下次启动会继续补齐
     console.log('[frost-mirror] 已从 exe 旁迁移旧配置到', DATA_DIR);
   } catch (e) {
     console.log('[frost-mirror] 旧配置迁移失败(不影响继续运行):', e.message);
@@ -128,9 +179,10 @@ function readSettings() {
       deepMode: !!raw.deepMode,
       clipWatch: raw.clipWatch !== false, // 复制即翻开关,默认开
       hotkey: typeof raw.hotkey === 'string' && raw.hotkey ? raw.hotkey : 'Alt+Q',
+      dataDirNoticeShown: !!raw.dataDirNoticeShown, // 数据目录告知弹窗只弹一次
     };
   } catch {
-    return { baseUrl: '', model: '', apiKey: '', tint: 0.3, onboarded: false, langTarget: 'auto', deepMode: false, clipWatch: true, hotkey: 'Alt+Q' };
+    return { baseUrl: '', model: '', apiKey: '', tint: 0.3, onboarded: false, langTarget: 'auto', deepMode: false, clipWatch: true, hotkey: 'Alt+Q', dataDirNoticeShown: false };
   }
 }
 
@@ -149,12 +201,17 @@ function saveSettings(s) {
   if (typeof s.deepMode === 'boolean') data.deepMode = s.deepMode;
   if (typeof s.clipWatch === 'boolean') data.clipWatch = s.clipWatch;
   if (typeof s.hotkey === 'string') data.hotkey = s.hotkey;
+  if (typeof s.dataDirNoticeShown === 'boolean') data.dataDirNoticeShown = s.dataDirNoticeShown;
   if (s.apiKey) {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统加密不可用');
     data.apiKeyEnc = safeStorage.encryptString(s.apiKey).toString('base64');
   }
+  const configured = !!(data.baseUrl && data.model && data.apiKeyEnc);
+  const firstConfig = configured && !data.dataDirNoticeShown;
+  if (firstConfig) data.dataDirNoticeShown = true; // 首次配置完成才弹一次提示
   fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+  return { dataDir: DATA_DIR, firstConfig };
 }
 
 // 思考模式由调用方决定:普通翻译关闭(快且省);深度模式开启(thinking enabled + low 强度,更慢更贵)
@@ -390,6 +447,19 @@ function createTray() {
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:save', (e, s) => saveSettings(s));
 ipcMain.handle('settings:validate', (e, s) => validateSettings(s));
+// 数据存储位置:查询当前目录与可用模式;切换会迁移数据(便携模式 exe 旁便携标志触发)
+ipcMain.handle('settings:get-data-dir', () => {
+  const mode = !app.isPackaged ? 'dev' : (fs.existsSync(PORTABLE_FLAG) ? 'portable' : 'appdata');
+  return { dataDir: DATA_DIR, mode, portableDir: EXE_DIR, appDataDir: APP_DATA_DIR };
+});
+ipcMain.handle('settings:set-data-dir', (e, mode) => {
+  try {
+    const moved = switchDataDir(mode);
+    return { ok: true, dataDir: DATA_DIR, moved };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 ipcMain.handle('settings:set-tint', (e, t) => {
   const cur = readSettings();
   cur.tint = Math.min(1, Math.max(0, Number(t) || 0));
