@@ -3,6 +3,8 @@ node_modules/
 settings.json
 history.json
 terms.json
+data-mode.txt
+data-mode.json
 dist/
 .test-md.log
 release/

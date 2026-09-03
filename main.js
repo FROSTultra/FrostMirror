@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const koffi = require('koffi');
@@ -6,17 +6,48 @@ const { streamChatCompletion } = require('./stream');
 const { buildTermRegex, findTermHits, parseCsv } = require('./terms-core');
 
 // 数据存储位置:
-// - 打包版默认 %APPDATA%\FrostMirror(与 exe 位置解耦,挪动不丢配置);
-// - exe 旁存在 portable.flag 时切为"数据跟 exe 走"(便携模式),由设置弹窗
-//   "数据存储位置"切换,切换时自动迁移已有配置与缓存;
-// - 开发模式(未打包)固定项目根目录,不参与切换。
-const EXE_DIR = app.isPackaged ? path.dirname(app.getPath('exe')) : '';
+// - "系统用户目录" = %APPDATA%\FrostMirror(与 exe 位置解耦,挪动不丢配置);
+// - "自定义" = 用户自选目录,默认程序目录(exe 旁;开发模式=项目根),可通过系统目录选择器改;
+// - 选择记录在 exe 旁(开发=项目根)的 data-mode.json,重启后保持;切换自动迁移配置与缓存。
+const EXE_DIR = app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname;
 const APP_DATA_DIR = path.join(app.getPath('appData'), 'FrostMirror');
-const PORTABLE_FLAG = EXE_DIR ? path.join(EXE_DIR, 'portable.flag') : '';
+const MODE_FILE = path.join(EXE_DIR, 'data-mode.json');
+// 旧版标志文件(仅打包版出现过):存在即视为自定义=程序目录
+const LEGACY_PORTABLE_FLAG = path.join(EXE_DIR, 'portable.flag');
+
+function readModeRecord() {
+  try {
+    const m = JSON.parse(fs.readFileSync(MODE_FILE, 'utf8'));
+    if (m.mode === 'appdata' || m.mode === 'custom') return m;
+  } catch {}
+  return null;
+}
+
+function currentDataMode() {
+  const m = readModeRecord();
+  if (m) return m.mode;
+  if (app.isPackaged && fs.existsSync(LEGACY_PORTABLE_FLAG)) return 'custom';
+  // 升级兼容:上一版会把数据迁到 %APPDATA%\FrostMirror,而程序目录没有数据 →
+  // 应保持 appdata,否则升级后数据会"消失"。
+  const appDataHasData = fs.existsSync(path.join(APP_DATA_DIR, 'settings.json'))
+    || fs.existsSync(path.join(APP_DATA_DIR, 'terms.json'))
+    || fs.existsSync(path.join(APP_DATA_DIR, 'history.json'));
+  const exeHasData = fs.existsSync(path.join(EXE_DIR, 'settings.json'))
+    || fs.existsSync(path.join(EXE_DIR, 'terms.json'))
+    || fs.existsSync(path.join(EXE_DIR, 'history.json'));
+  if (appDataHasData && !exeHasData) return 'appdata';
+  // 默认:自定义(= 程序目录),与 UI"默认是程序目录"一致
+  return 'custom';
+}
+
+function dataCustomDir() {
+  const m = readModeRecord();
+  if (m && m.mode === 'custom' && typeof m.dir === 'string' && m.dir.trim()) return m.dir;
+  return EXE_DIR; // 默认自定义目录 = 程序目录
+}
 
 function resolveDataDir() {
-  if (!app.isPackaged) return __dirname;
-  return fs.existsSync(PORTABLE_FLAG) ? EXE_DIR : APP_DATA_DIR;
+  return currentDataMode() === 'custom' ? dataCustomDir() : APP_DATA_DIR;
 }
 
 let DATA_DIR = resolveDataDir();
@@ -30,22 +61,30 @@ function refreshPaths() {
   TERMS_FILE = path.join(DATA_DIR, 'terms.json');
 }
 
-// 切换数据目录:把当前数据复制到目标(覆盖目标侧旧副本),更新便携标志并重指路径。
-function switchDataDir(mode) {
-  if (!app.isPackaged) throw new Error('开发模式固定使用项目目录');
-  const target = mode === 'portable'
-    ? EXE_DIR
+// 切换/改数据目录:把当前数据复制到目标(覆盖目标侧旧副本),记录模式并重指路径。
+// mode: 'appdata' | 'custom';dir 仅 custom 模式使用(空 = 程序目录)。
+function switchDataDir(mode, dir = '') {
+  if (mode !== 'appdata' && mode !== 'custom') throw new Error('无效的存储模式');
+  const target = mode === 'custom'
+    ? path.resolve(dir && dir.trim() ? dir : EXE_DIR)
     : APP_DATA_DIR;
-  if (target === DATA_DIR) return false;
-  fs.mkdirSync(target, { recursive: true });
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(target, { recursive: true });
+  } else if (!fs.statSync(target).isDirectory()) {
+    throw new Error('目标不是一个文件夹:' + target);
+  }
+  if (path.resolve(target) === path.resolve(DATA_DIR)) {
+    // 目录没变:只更新记录(如 appdata→appdata 无变化)
+    fs.writeFileSync(MODE_FILE, JSON.stringify({ mode, dir: mode === 'custom' ? target : '' }));
+    return false;
+  }
   for (const name of ['settings.json', 'terms.json', 'history.json']) {
     const src = path.join(DATA_DIR, name);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(target, name));
   }
   const srcCache = path.join(DATA_DIR, 'glass-data');
   if (fs.existsSync(srcCache)) copyRecursive(srcCache, path.join(target, 'glass-data'));
-  if (mode === 'portable') fs.writeFileSync(PORTABLE_FLAG, '');
-  else fs.rmSync(PORTABLE_FLAG, { force: true });
+  fs.writeFileSync(MODE_FILE, JSON.stringify({ mode, dir: mode === 'custom' ? target : '' }));
   DATA_DIR = target;
   refreshPaths();
   if (app.isPackaged) app.setPath('userData', path.join(DATA_DIR, 'glass-data'));
@@ -447,18 +486,31 @@ function createTray() {
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:save', (e, s) => saveSettings(s));
 ipcMain.handle('settings:validate', (e, s) => validateSettings(s));
-// 数据存储位置:查询当前目录与可用模式;切换会迁移数据(便携模式 exe 旁便携标志触发)
+// 数据存储位置:查询当前目录与可用模式;切换会迁移数据并记录模式(重启保持)
 ipcMain.handle('settings:get-data-dir', () => {
-  const mode = !app.isPackaged ? 'dev' : (fs.existsSync(PORTABLE_FLAG) ? 'portable' : 'appdata');
-  return { dataDir: DATA_DIR, mode, portableDir: EXE_DIR, appDataDir: APP_DATA_DIR };
+  return {
+    dataDir: DATA_DIR,
+    mode: currentDataMode(),
+    customDir: dataCustomDir(),
+    exeDir: EXE_DIR,
+    appDataDir: APP_DATA_DIR,
+  };
 });
-ipcMain.handle('settings:set-data-dir', (e, mode) => {
+ipcMain.handle('settings:set-data-dir', (e, { mode, dir } = {}) => {
   try {
-    const moved = switchDataDir(mode);
-    return { ok: true, dataDir: DATA_DIR, moved };
+    const moved = switchDataDir(mode, dir || '');
+    return { ok: true, dataDir: DATA_DIR, mode: currentDataMode(), moved };
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+// 系统目录选择器:返回用户选中的目录,取消返回 null
+ipcMain.handle('dialog:select-dir', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择数据存储目录',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
 });
 ipcMain.handle('settings:set-tint', (e, t) => {
   const cur = readSettings();

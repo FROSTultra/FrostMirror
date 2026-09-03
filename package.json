@@ -1,7 +1,7 @@
 {
   "name": "frost-mirror",
   "productName": "FrostMirror",
-  "version": "1.0.1",
+  "version": "1.1.4",
   "description": "FrostMirror · 镜语 —— 置顶毛玻璃 AI 翻译小窗(学习项目)",
   "main": "main.js",
   "scripts": {

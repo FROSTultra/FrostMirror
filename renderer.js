@@ -65,7 +65,7 @@ function updateModelLabel() {
   $('btnModel').textContent = $('settingsForm').model.value.trim() || '未配置模型';
 }
 
-// ---- 数据存储位置选择(首次告知弹窗 + 设置弹窗共用同一逻辑) ----
+// ---- 数据存储位置选择(首次告知弹窗 + 设置弹窗共用;配置完成后仍可随时更改) ----
 const noticeDialog = $('noticeDialog');
 let noticePending = false;
 function showDataDirNotice() {
@@ -76,61 +76,113 @@ function showDataDirNotice() {
 }
 async function openPendingNotice() {
   if (!noticePending) return;
-  const settingsDlg = $('settingsDialog');
-  if (settingsDlg.open) {
-    settingsDlg.addEventListener('close', () => openPendingNotice(), { once: true });
-    return; // 设置弹窗还开着,等它 close 再弹
+  if (isSettingsOpen()) {
+    // 设置侧栏还开着:等它关闭再弹,避免两个浮层叠在一起
+    const waitClose = () => {
+      if (isSettingsOpen()) { setTimeout(waitClose, 200); return; }
+      openPendingNotice();
+    };
+    setTimeout(waitClose, 200);
+    return;
   }
   noticePending = false;
-  byId('storagePickerNotice').classList.remove('hidden');
   await refreshStoragePickers();
   noticeDialog.showModal();
 }
 
 function byId(id) { return document.getElementById(id); }
 
-// 数据目录选择器:点击选项立即切换(主进程迁移数据),渲染层保持高亮与现状一致
-async function storageSelect(mode, pickerId, hintId) {
-  const r = await window.api.setDataDir(mode);
-  if (r.ok) {
-    await refreshStoragePickers();
-  } else {
-    const msg = byId(hintId);
+// 数据目录选择器:点击选项立即切换(主进程迁移数据),渲染层保持高亮与现状一致。
+// appdata = 系统用户目录;custom = 自定义路径(默认程序目录),激活时显示路径输入+浏览。
+async function storageSelect(mode, dir = '') {
+  const r = await window.api.setDataDir(mode, dir);
+  if (!r.ok) {
+    const msg = byId('storageHintSettings') || byId('storageHint');
     msg.textContent = '✗ 切换失败:' + r.error;
     msg.classList.add('fail');
     await refreshStoragePickers();
+    return false;
   }
+  await refreshStoragePickers();
+  return true;
 }
 
 async function refreshStoragePickers() {
   const info = await window.api.getDataDir();
-  for (const pickerId of ['storagePickerNotice', 'storagePickerSettings']) {
+  for (const pickerId of ['storagePicker', 'storagePickerSettings']) {
     const picker = byId(pickerId);
     if (!picker) continue;
     for (const b of picker.querySelectorAll('[data-storage]')) {
       b.classList.toggle('active', b.dataset.storage === info.mode);
-      b.disabled = info.mode === 'dev';
     }
   }
-  for (const hintId of ['storageHintNotice', 'storageHintSettings']) {
+  // 自定义目录输入框:模式为 custom 时显示并回填路径
+  for (const [inputId, wrapId] of [['customDirInputNotice', 'customDirNotice'], ['customDirInputSettings', 'customDirSettings']]) {
+    const input = byId(inputId);
+    const wrap = byId(wrapId);
+    if (!input || !wrap) continue;
+    if (info.mode === 'custom') {
+      wrap.classList.remove('hidden');
+      if (document.activeElement !== input) input.value = info.customDir || '';
+    } else {
+      wrap.classList.add('hidden');
+    }
+  }
+  for (const hintId of ['storageHint', 'storageHintSettings']) {
     const hint = byId(hintId);
     if (!hint) continue;
-    const cur = info.mode === 'portable' ? '程序目录(便携)' : info.mode === 'appdata' ? '系统用户目录' : '开发模式';
-    hint.textContent = info.mode === 'dev'
-      ? '开发模式(未打包):数据固定存项目目录,忽略此设置。'
-      : `当前:${cur} → ${info.dataDir}`;
+    const cur = info.mode === 'custom' ? '自定义' : '系统用户目录';
+    hint.textContent = `当前:${cur} → ${info.dataDir}`;
     hint.classList.remove('fail');
   }
 }
 
-// 两个入口(通知弹窗 + 设置弹窗)共用一份绑定,setDataDir 主进程负责迁移与标志。
-// 注意后续新增入口时同步补充 DOM id。
-for (const [pickerId, hintId] of [['storagePickerNotice', 'storageHintNotice'], ['storagePickerSettings', 'storageHintSettings']]) {
+// 模式选项:点击切换;自定义输入框回车/失焦即生效,浏览按钮走系统目录选择器
+for (const pickerId of ['storagePicker', 'storagePickerSettings']) {
   const picker = byId(pickerId);
   if (!picker) continue;
   for (const btn of picker.querySelectorAll('[data-storage]')) {
-    btn.addEventListener('click', () => storageSelect(btn.dataset.storage, pickerId, hintId));
+    btn.addEventListener('click', async () => {
+      if (btn.dataset.storage === 'custom') {
+        const ok = await storageSelect('custom', ''); // 默认程序目录,输入框随后显示
+        if (ok) {
+          const info = await window.api.getDataDir();
+          for (const inputId of ['customDirInputNotice', 'customDirInputSettings']) {
+            const input = byId(inputId);
+            if (input) input.value = info.customDir || '';
+          }
+        }
+      } else {
+        await storageSelect(btn.dataset.storage);
+      }
+    });
   }
+}
+
+// 自定义路径输入:回车生效;浏览用系统选择器
+for (const [inputId, browseId] of [['customDirInputNotice', 'btnBrowseNotice'], ['customDirInputSettings', 'btnBrowseSettings']]) {
+  const input = byId(inputId);
+  const browse = byId(browseId);
+  if (!input || !browse) continue;
+  const apply = async () => {
+    const v = input.value.trim();
+    if (!v) return;
+    await storageSelect('custom', v);
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      input.blur();
+    }
+  });
+  input.addEventListener('blur', apply);
+  browse.addEventListener('click', async () => {
+    const dir = await window.api.selectDataDir();
+    if (dir) {
+      input.value = dir;
+      await storageSelect('custom', dir);
+    }
+  });
 }
 
 $('btnNotice').addEventListener('click', () => noticeDialog.close());
@@ -317,7 +369,7 @@ async function openTermsDialog() {
 }
 
 $('btnOpenTerms').onclick = () => {
-  $('settingsDialog').close();
+  closeSettings();
   openTermsDialog();
 };
 $('btnTermsClose').onclick = () => $('termsDialog').close();
@@ -510,9 +562,10 @@ result.addEventListener('click', (e) => {
 result.addEventListener('dblclick', reset);
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (isSettingsOpen()) { closeSettings(); return; } // Esc 优先关设置侧栏
     const open = document.querySelector('dialog[open]');
     if (open) {
-      open.close(); // Esc 优先关掉最上层弹窗
+      open.close(); // Esc 其次关最上层弹窗
     } else {
       reset();
     }
@@ -628,12 +681,50 @@ $('histList').addEventListener('click', async (e) => {
   }
 });
 
-// ---- 设置弹窗(点击底部模型名打开)----
+// ---- 悬浮岛式设置侧边栏(点击底部模型名打开/关闭)----
+const settingsPanel = $('settingsPanel');
+function isSettingsOpen() { return !settingsPanel.classList.contains('hidden'); }
+function openSettings() {
+  settingsPanel.classList.remove('hidden');
+  // 从主进程拉最新配置回填(取消/未保存的残留值不会带进来)
+  window.api.getSettings().then((s) => {
+    const f = $('settingsForm');
+    f.baseUrl.value = s.baseUrl || '';
+    f.model.value = s.model || '';
+    f.apiKey.value = s.apiKey || '';
+    $('clipWatchCheck').checked = !!s.clipWatch;
+    $('hotkeyInput').value = s.hotkey || 'Alt+Q';
+    snapshotDirty(settingsPanel);
+  }).catch(() => snapshotDirty(settingsPanel));
+}
+function closeSettings() {
+  settingsPanel.classList.add('hidden');
+  settingsDirty = null;
+}
 $('btnModel').onclick = () => {
-  $('settingsDialog').showModal();
-  snapshotDialog($('settingsDialog'));
+  if (isSettingsOpen()) closeSettings();
+  else openSettings();
 };
-$('btnCancel').onclick = () => $('settingsDialog').close();
+$('btnPanelClose').onclick = closeSettings;
+$('btnCancel').onclick = closeSettings;
+
+// 未保存改动保护:打开时快照表单值,点击面板外且无改动才直接关;
+// 有改动时与"取消/保存"一致,等用户自己操作,避免误关丢输入。
+let settingsDirty = null;
+function snapshotDirty(dlg) {
+  const sel = 'input:not([type="file"]):not([type="hidden"]):not([readonly]), select, textarea';
+  const read = () => [...dlg.querySelectorAll(sel)]
+    .map((el) => (el.type === 'checkbox' ? el.checked : el.value)).join('\u0001');
+  const base = read();
+  settingsDirty = () => read() !== base;
+}
+// 点击面板外 → 无未保存改动则关闭(非模态,不遮罩主界面,与弹窗行为一致)
+document.addEventListener('mousedown', (e) => {
+  if (!isSettingsOpen()) return;
+  if (settingsPanel.contains(e.target)) return;
+  if (settingsDirty?.()) return; // 有未保存改动:留给保存/取消,不误关
+  closeSettings();
+});
 
 // ---- 弹窗点空白自动关闭:打开时快照"未保存改动"范围,点击遮罩且无改动才关闭 ----
 // guardSel:受保护控件(改动未保存/会丢失);不传则全弹窗控件受保护,传 '' 表示随时可点空白关闭
@@ -654,7 +745,6 @@ function bindBackdropDismiss(dlg) {
     dlg.close();
   });
 }
-bindBackdropDismiss($('settingsDialog'));
 bindBackdropDismiss($('termsDialog'));
 bindBackdropDismiss($('historyDialog'));
 
@@ -768,7 +858,7 @@ $('settingsForm').onsubmit = async (e) => {
     msg.className = 'validate-msg ok';
     updateModelLabel();
     if (saved?.firstConfig) showDataDirNotice();
-    setTimeout(() => $('settingsDialog').close(), 800);
+    setTimeout(closeSettings, 800);
   } catch (err) {
     msg.textContent = '✗ ' + err.message;
     msg.className = 'validate-msg fail';

@@ -186,62 +186,100 @@
     <div id="histList"></div>
   </dialog>
 
-  <dialog id="settingsDialog">
-    <form id="settingsForm">
+  <!-- 悬浮岛式设置侧边栏:从右下角模型名按钮处浮现的玻璃卡片 -->
+  <aside id="settingsPanel" class="side-panel hidden">
+    <div class="side-head">
       <h2>设置</h2>
-      <label>接口地址(OpenAI 兼容)
-        <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
-      </label>
-      <label>模型 ID
-        <input name="model" placeholder="deepseek-chat" required />
-      </label>
-      <label>API Key
-        <input name="apiKey" type="password" placeholder="sk-…" required />
-      </label>
-      <p class="hint">Key 将用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
-      <label class="deep-row">
-        <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
-        <input type="checkbox" id="clipWatchCheck" />
-      </label>
-      <label class="deep-row storage-row">
-        <span class="deep-name">数据存储位置<span class="deep-desc">配置 · 历史 · 术语表</span></span>
-      </label>
-      <div class="term-channels" id="storagePickerSettings">
-        <button type="button" class="channel-opt" data-storage="appdata">
-          系统用户目录<span>挪动程序不丢设置</span>
-        </button>
-        <button type="button" class="channel-opt" data-storage="portable">
-          程序目录(便携)<span>数据跟 exe 走</span>
-        </button>
-      </div>
-      <p class="hint" id="storageHintSettings"></p>
-      <button type="button" class="mini-btn wide" id="btnOpenTerms">管理术语表…</button>
-      <label>全局热键(点击后直接按组合键,如 Alt+O)
-        <input id="hotkeyInput" placeholder="点击此处,按下组合键…" readonly />
-      </label>
-      <p class="hint">退格 / Delete 清空停用;Esc 放弃修改。</p>
-      <p class="validate-msg" id="hotkeyMsg"></p>
-      <div class="dialog-actions">
-        <button type="submit" id="btnSave">保存并验证</button>
-        <button type="button" id="btnCancel">取消</button>
-      </div>
-      <p class="validate-msg" id="validateMsg"></p>
-    </form>
-  </dialog>
+      <button type="button" class="side-close" id="btnPanelClose" aria-label="关闭设置">✕</button>
+    </div>
+    <div class="side-body">
+      <form id="settingsForm">
+        <details class="side-sec" open>
+          <summary class="sec-head">API Key 设置<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label>接口地址(OpenAI 兼容)
+              <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
+            </label>
+            <label>模型 ID
+              <input name="model" placeholder="deepseek-chat" required />
+            </label>
+            <label>API Key
+              <input name="apiKey" type="password" placeholder="sk-…" required />
+            </label>
+            <p class="hint">Key 将用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">复制即翻<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label class="deep-row">
+              <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
+              <input type="checkbox" id="clipWatchCheck" />
+            </label>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">数据存储位置<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <p class="hint">配置 · 历史 · 术语表存放处</p>
+            <div class="term-channels" id="storagePickerSettings">
+              <button type="button" class="channel-opt" data-storage="appdata">
+                系统用户目录<span>挪动程序不丢设置</span>
+              </button>
+              <button type="button" class="channel-opt" data-storage="custom">
+                自定义<span>默认程序目录 · 可改</span>
+              </button>
+            </div>
+            <div class="storage-custom hidden" id="customDirSettings">
+              <input id="customDirInputSettings" placeholder="D:\数据目录" spellcheck="false" />
+              <button type="button" class="mini-btn" id="btnBrowseSettings">浏览…</button>
+            </div>
+            <p class="hint" id="storageHintSettings"></p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">术语表<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <button type="button" class="mini-btn wide" id="btnOpenTerms">管理术语表…</button>
+            <p class="hint">双通道:语境软约束 / 严格占位符;支持 CSV 导入、结果一键收录。</p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">全局热键<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label>点击后直接按组合键,如 Alt+O
+              <input id="hotkeyInput" placeholder="点击此处,按下组合键…" readonly />
+            </label>
+            <p class="hint">退格 / Delete 清空停用;Esc 放弃修改。</p>
+            <p class="validate-msg" id="hotkeyMsg"></p>
+          </div>
+        </details>
+        <div class="dialog-actions">
+          <button type="submit" id="btnSave">保存并验证</button>
+          <button type="button" id="btnCancel">取消</button>
+        </div>
+        <p class="validate-msg" id="validateMsg"></p>
+      </form>
+    </div>
+  </aside>
 
-  <!-- 首次配置完成的告知弹窗:让用户自己选数据存放位置,选中即迁移;只弹一次 -->
+  <!-- 首次配置完成的告知弹窗:让用户选数据存放位置,选中即迁移;之后可在"设置"弹窗随时更改 -->
   <dialog id="noticeDialog">
     <h2>配置已保存</h2>
     <p class="hint">设置(含 API Key)、翻译记录与术语表存放在哪里,由你选择:选中后立即迁移,之后可在"设置"弹窗中随时更改。</p>
-    <div class="term-channels" id="storagePickerNotice">
+    <div class="term-channels" id="storagePicker">
       <button type="button" class="channel-opt" data-storage="appdata">
         系统用户目录<span>推荐 · 挪动程序不丢设置</span>
       </button>
-      <button type="button" class="channel-opt" data-storage="portable">
-        程序目录(便携)<span>数据跟 exe 走</span>
+      <button type="button" class="channel-opt" data-storage="custom">
+        自定义<span>默认程序目录 · 可改</span>
       </button>
     </div>
-    <p class="hint" id="storageHintNotice"></p>
+    <div class="storage-custom hidden" id="customDirNotice">
+      <input id="customDirInputNotice" placeholder="D:\数据目录" spellcheck="false" />
+      <button type="button" class="mini-btn" id="btnBrowseNotice">浏览…</button>
+    </div>
+    <p class="hint" id="storageHint"></p>
     <p class="hint">API Key 用 Windows 系统加密存储,不落明文;换电脑或换 Windows 账户后需重新填写。</p>
     <div class="dialog-actions">
       <button type="button" id="btnNotice">确定</button>
