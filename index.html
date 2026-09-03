@@ -57,7 +57,7 @@
           <span class="deep-name">深度模式<span class="deep-desc">更慢 · 更耗 token</span></span>
           <input type="checkbox" id="deepCheck" />
         </label>
-        <p class="deep-warn hidden" id="deepWarn">⚠ 已开启:思考会让翻译更慢、消耗更多 token(费用更高),普通句子建议关闭。</p>
+        <p class="deep-warn" id="deepWarn">⚠ 已开启:思考会让翻译更慢、消耗更多 token(费用更高),普通句子建议关闭。</p>
       </div>
     </div>
     <div class="columns">
@@ -65,56 +65,225 @@
       <textarea id="input" spellcheck="false"></textarea>
       <div class="result hidden" id="result">
         <div class="result-dst" id="resultDst"></div>
-        <button class="copy-btn" id="btnCopy">复制</button>
+        <div class="term-capture hidden" id="termCapture">
+          <div class="cap-row">
+            <input id="capSrc" placeholder="原文术语" />
+            <span class="cap-arrow">→</span>
+            <input id="capDst" placeholder="译名" />
+          </div>
+          <div class="cap-row">
+            <input id="capDesc" placeholder="备注(可选)" />
+            <button class="mini-btn" id="capSave">保存</button>
+            <button class="mini-btn" id="capCancel">取消</button>
+          </div>
+        </div>
+        <div class="result-actions">
+          <button class="copy-btn term-cap-btn" id="btnTerm">＋术语</button>
+          <button class="copy-btn" id="btnCopy">复制</button>
+        </div>
       </div>
     </div>
   </main>
 
   <footer class="bar statusbar">
     <span id="meta">
-      <span class="m-item"><span class="m-ic">⏱</span><span id="timeText">-- ms</span></span>
-      <span class="m-sep">·</span>
-      <span class="m-item">
+      <button class="m-btn" id="btnHistory" aria-label="历史记录">
         <svg class="m-ic" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="12" cy="5.5" rx="8" ry="2.8" />
-          <path d="M4 5.5v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V5.5" />
-          <path d="M4 12v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V12" />
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3.5 2" />
         </svg>
-        <span id="tokenText">-- tokens</span>
+        历史
+      </button>
+      <span id="perfGroup">
+        <span class="m-sep">·</span>
+        <span class="m-item">
+          <svg class="m-ic" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="10" y1="2" x2="14" y2="2" />
+            <line x1="12" y1="2" x2="12" y2="5" />
+            <circle cx="12" cy="13.5" r="8" />
+            <path d="M12 13.5l3-2" />
+          </svg>
+          <span id="timeText">-- ms</span>
+        </span>
+        <span class="m-sep">·</span>
+        <span class="m-item">
+          <svg class="m-ic" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5.5" rx="8" ry="2.8" />
+            <path d="M4 5.5v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V5.5" />
+            <path d="M4 12v6.5c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8V12" />
+          </svg>
+          <span id="tokenText">-- tokens</span>
+        </span>
       </span>
       <span class="m-sep">·</span>
-      <span class="m-item hidden" id="modeBadge"><span class="m-ic" id="modeIc">📖</span><span id="modeText">词典</span></span>
+      <span class="m-item hidden" id="modeBadge">
+        <svg class="m-ic" id="icDict" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+        </svg>
+        <svg class="m-ic hidden" id="icTrans" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3L4 7l4 4" />
+          <path d="M4 7h16" />
+          <path d="M16 21l4-4-4-4" />
+          <path d="M20 17H4" />
+        </svg>
+        <span id="modeText">词典</span>
+      </span>
+      <span class="m-sep">·</span>
+      <button class="m-item term-warn hidden" id="termWarn">
+        <svg class="m-ic" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        术语
+      </button>
     </span>
     <button class="model-btn" id="btnModel">未配置模型</button>
   </footer>
 
-  <dialog id="settingsDialog">
-    <form id="settingsForm">
-      <h2>设置</h2>
-      <label>接口地址(OpenAI 兼容)
-        <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
-      </label>
-      <label>模型 ID
-        <input name="model" placeholder="deepseek-chat" required />
-      </label>
-      <label>API Key
-        <input name="apiKey" type="password" placeholder="sk-…" required />
-      </label>
-      <p class="hint">Key 将用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
-      <label class="deep-row">
-        <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
-        <input type="checkbox" id="clipWatchCheck" />
-      </label>
-      <label>全局热键(任意应用呼出窗口,accelerator 格式)
-        <input id="hotkeyInput" placeholder="Alt+Q" />
-      </label>
-      <p class="validate-msg" id="hotkeyMsg"></p>
-      <div class="dialog-actions">
-        <button type="submit" id="btnSave">保存并验证</button>
-        <button type="button" id="btnCancel">取消</button>
+  <dialog id="termsDialog">
+    <div class="dialog-head">
+      <h2>术语表</h2>
+      <div class="dialog-head-acts">
+        <button type="button" class="mini-btn" id="btnTermsClose">关闭</button>
       </div>
-      <p class="validate-msg" id="validateMsg"></p>
-    </form>
+    </div>
+    <label class="deep-row">
+      <span class="deep-name">启用术语表<span class="deep-desc">翻译时套用你的译名</span></span>
+      <input type="checkbox" id="termsEnabled" />
+    </label>
+    <div class="term-channels">
+      <button type="button" class="channel-opt" data-ch="context">语境软约束<span>推荐</span></button>
+      <button type="button" class="channel-opt" data-ch="strict">严格占位符</button>
+    </div>
+    <p class="hint" id="termsChannelHint"></p>
+    <div class="term-add">
+      <input id="termNewSrc" placeholder="原文(如 cache)" />
+      <span class="cap-arrow">→</span>
+      <input id="termNewDst" placeholder="译名(如 缓存)" />
+      <button type="button" class="mini-btn" id="btnTermAdd">添加</button>
+    </div>
+    <div id="termList"></div>
+    <div class="dialog-actions">
+      <button type="button" id="btnTermsCsv">导入 CSV</button>
+      <button type="button" id="btnTermsPreset">恢复预置包</button>
+    </div>
+    <input type="file" id="termsCsvFile" accept=".csv,text/csv" class="hidden" />
+    <p class="hint">CSV 格式:source,target,description,case_sensitive(仅前两列必填)。</p>
+    <p class="validate-msg" id="termsMsg"></p>
+  </dialog>
+
+  <dialog id="historyDialog">
+    <div class="dialog-head">
+      <h2>历史记录</h2>
+      <div class="dialog-head-acts">
+        <button type="button" class="mini-btn" id="btnHistClear">清空</button>
+        <button type="button" class="mini-btn" id="btnHistClose">关闭</button>
+      </div>
+    </div>
+    <p class="hint">点击条目回看;仅存本地 history.json,最多 200 条。</p>
+    <div id="histList"></div>
+  </dialog>
+
+  <!-- 悬浮岛式设置侧边栏:从右下角模型名按钮处浮现的玻璃卡片 -->
+  <aside id="settingsPanel" class="side-panel hidden">
+    <div class="side-head">
+      <h2>设置</h2>
+      <button type="button" class="side-close" id="btnPanelClose" aria-label="关闭设置">✕</button>
+    </div>
+    <div class="side-body">
+      <form id="settingsForm">
+        <details class="side-sec" open>
+          <summary class="sec-head">API Key 设置<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label>接口地址(OpenAI 兼容)
+              <input name="baseUrl" type="url" placeholder="https://api.deepseek.com/v1" required />
+            </label>
+            <label>模型 ID
+              <input name="model" placeholder="deepseek-chat" required />
+            </label>
+            <label>API Key
+              <input name="apiKey" type="password" placeholder="sk-…" required />
+            </label>
+            <p class="hint">Key 将用系统加密(Windows DPAPI)存入本地,不保存明文。</p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">复制即翻<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label class="deep-row">
+              <span class="deep-name">复制即翻<span class="deep-desc">他处复制文本 → 自动浮窗翻译</span></span>
+              <input type="checkbox" id="clipWatchCheck" />
+            </label>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">数据存储位置<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <p class="hint">配置 · 历史 · 术语表存放处</p>
+            <div class="term-channels" id="storagePickerSettings">
+              <button type="button" class="channel-opt" data-storage="appdata">
+                系统用户目录<span>挪动程序不丢设置</span>
+              </button>
+              <button type="button" class="channel-opt" data-storage="custom">
+                自定义<span>默认程序目录 · 可改</span>
+              </button>
+            </div>
+            <div class="storage-custom hidden" id="customDirSettings">
+              <input id="customDirInputSettings" placeholder="D:\数据目录" spellcheck="false" />
+              <button type="button" class="mini-btn" id="btnBrowseSettings">浏览…</button>
+            </div>
+            <p class="hint" id="storageHintSettings"></p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">术语表<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <button type="button" class="mini-btn wide" id="btnOpenTerms">管理术语表…</button>
+            <p class="hint">双通道:语境软约束 / 严格占位符;支持 CSV 导入、结果一键收录。</p>
+          </div>
+        </details>
+        <details class="side-sec">
+          <summary class="sec-head">全局热键<span class="sec-arrow">▾</span></summary>
+          <div class="sec-body">
+            <label>点击后直接按组合键,如 Alt+O
+              <input id="hotkeyInput" placeholder="点击此处,按下组合键…" readonly />
+            </label>
+            <p class="hint">退格 / Delete 清空停用;Esc 放弃修改。</p>
+            <p class="validate-msg" id="hotkeyMsg"></p>
+          </div>
+        </details>
+        <div class="dialog-actions">
+          <button type="submit" id="btnSave">保存并验证</button>
+          <button type="button" id="btnCancel">取消</button>
+        </div>
+        <p class="validate-msg" id="validateMsg"></p>
+      </form>
+    </div>
+  </aside>
+
+  <!-- 首次配置完成的告知弹窗:让用户选数据存放位置,选中即迁移;之后可在"设置"弹窗随时更改 -->
+  <dialog id="noticeDialog">
+    <h2>配置已保存</h2>
+    <p class="hint">设置(含 API Key)、翻译记录与术语表存放在哪里,由你选择:选中后立即迁移,之后可在"设置"弹窗中随时更改。</p>
+    <div class="term-channels" id="storagePicker">
+      <button type="button" class="channel-opt" data-storage="appdata">
+        系统用户目录<span>推荐 · 挪动程序不丢设置</span>
+      </button>
+      <button type="button" class="channel-opt" data-storage="custom">
+        自定义<span>默认程序目录 · 可改</span>
+      </button>
+    </div>
+    <div class="storage-custom hidden" id="customDirNotice">
+      <input id="customDirInputNotice" placeholder="D:\数据目录" spellcheck="false" />
+      <button type="button" class="mini-btn" id="btnBrowseNotice">浏览…</button>
+    </div>
+    <p class="hint" id="storageHint"></p>
+    <p class="hint">API Key 用 Windows 系统加密存储,不落明文;换电脑或换 Windows 账户后需重新填写。</p>
+    <div class="dialog-actions">
+      <button type="button" id="btnNotice">确定</button>
+    </div>
   </dialog>
 
   <!-- 首次启动引导:两步玻璃小卡(介绍 → 配置),完成后不再出现 -->
@@ -147,6 +316,8 @@
     </div>
   </div>
 
+  <script src="assets/vendor/marked.min.js"></script>
+  <script src="assets/vendor/purify.min.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

@@ -1,19 +1,188 @@
-const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, clipboard, globalShortcut, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const koffi = require('koffi');
+const { streamChatCompletion } = require('./stream');
+const { buildTermRegex, findTermHits, parseCsv } = require('./terms-core');
 
-// 便携软件路线:不写用户 C 盘。
-// 打包后:配置存在 exe 旁边(便携 exe 取 PORTABLE_EXECUTABLE_DIR,zip 版取 exe 所在目录);
-// 开发模式(未打包):配置在项目根目录,方便查看修改。
-const PORTABLE_DIR = process.env.PORTABLE_EXECUTABLE_DIR
-  || (app.isPackaged ? path.dirname(app.getPath('exe')) : '');
+// 数据存储位置:
+// - "系统用户目录" = %APPDATA%\FrostMirror(与 exe 位置解耦,挪动不丢配置);
+// - "自定义" = 用户自选目录,默认程序目录(exe 旁;开发模式=项目根),可通过系统目录选择器改;
+// - 选择记录在 exe 旁(开发=项目根)的 data-mode.json,重启后保持;切换自动迁移配置与缓存。
+const EXE_DIR = app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname;
+const APP_DATA_DIR = path.join(app.getPath('appData'), 'FrostMirror');
+const MODE_FILE = path.join(EXE_DIR, 'data-mode.json');
+// 旧版标志文件(仅打包版出现过):存在即视为自定义=程序目录
+const LEGACY_PORTABLE_FLAG = path.join(EXE_DIR, 'portable.flag');
 
-const SETTINGS_FILE = path.join(PORTABLE_DIR || __dirname, 'settings.json');
+function readModeRecord() {
+  try {
+    const m = JSON.parse(fs.readFileSync(MODE_FILE, 'utf8'));
+    if (m.mode === 'appdata' || m.mode === 'custom') return m;
+  } catch {}
+  return null;
+}
 
-if (PORTABLE_DIR) {
-  // Chromium 的缓存/存储也搬到 exe 旁的 glass-data,彻底不占用 C 盘
-  app.setPath('userData', path.join(PORTABLE_DIR, 'glass-data'));
+function currentDataMode() {
+  const m = readModeRecord();
+  if (m) return m.mode;
+  if (app.isPackaged && fs.existsSync(LEGACY_PORTABLE_FLAG)) return 'custom';
+  // 升级兼容:上一版会把数据迁到 %APPDATA%\FrostMirror,而程序目录没有数据 →
+  // 应保持 appdata,否则升级后数据会"消失"。
+  const appDataHasData = fs.existsSync(path.join(APP_DATA_DIR, 'settings.json'))
+    || fs.existsSync(path.join(APP_DATA_DIR, 'terms.json'))
+    || fs.existsSync(path.join(APP_DATA_DIR, 'history.json'));
+  const exeHasData = fs.existsSync(path.join(EXE_DIR, 'settings.json'))
+    || fs.existsSync(path.join(EXE_DIR, 'terms.json'))
+    || fs.existsSync(path.join(EXE_DIR, 'history.json'));
+  if (appDataHasData && !exeHasData) return 'appdata';
+  // 默认:自定义(= 程序目录),与 UI"默认是程序目录"一致
+  return 'custom';
+}
+
+function dataCustomDir() {
+  const m = readModeRecord();
+  if (m && m.mode === 'custom' && typeof m.dir === 'string' && m.dir.trim()) return m.dir;
+  return EXE_DIR; // 默认自定义目录 = 程序目录
+}
+
+function resolveDataDir() {
+  return currentDataMode() === 'custom' ? dataCustomDir() : APP_DATA_DIR;
+}
+
+let DATA_DIR = resolveDataDir();
+let SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+let HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+let TERMS_FILE = path.join(DATA_DIR, 'terms.json');
+
+function refreshPaths() {
+  SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+  HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+  TERMS_FILE = path.join(DATA_DIR, 'terms.json');
+}
+
+// 切换/改数据目录:把当前数据复制到目标(覆盖目标侧旧副本),记录模式并重指路径。
+// mode: 'appdata' | 'custom';dir 仅 custom 模式使用(空 = 程序目录)。
+function switchDataDir(mode, dir = '') {
+  if (mode !== 'appdata' && mode !== 'custom') throw new Error('无效的存储模式');
+  const target = mode === 'custom'
+    ? path.resolve(dir && dir.trim() ? dir : EXE_DIR)
+    : APP_DATA_DIR;
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(target, { recursive: true });
+  } else if (!fs.statSync(target).isDirectory()) {
+    throw new Error('目标不是一个文件夹:' + target);
+  }
+  if (path.resolve(target) === path.resolve(DATA_DIR)) {
+    // 目录没变:只更新记录(如 appdata→appdata 无变化)
+    fs.writeFileSync(MODE_FILE, JSON.stringify({ mode, dir: mode === 'custom' ? target : '' }));
+    return false;
+  }
+  for (const name of ['settings.json', 'terms.json', 'history.json']) {
+    const src = path.join(DATA_DIR, name);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(target, name));
+  }
+  const srcCache = path.join(DATA_DIR, 'glass-data');
+  if (fs.existsSync(srcCache)) copyRecursive(srcCache, path.join(target, 'glass-data'));
+  fs.writeFileSync(MODE_FILE, JSON.stringify({ mode, dir: mode === 'custom' ? target : '' }));
+  DATA_DIR = target;
+  refreshPaths();
+  if (app.isPackaged) app.setPath('userData', path.join(DATA_DIR, 'glass-data'));
+  return true;
+}
+
+const HISTORY_LIMIT = 200;
+
+function loadHistory() {
+  try { return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { return []; }
+}
+
+function saveHistory(list) {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(list));
+}
+
+function addHistory(entry) {
+  const list = loadHistory();
+  list.unshift({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    time: Date.now(),
+    ...entry,
+  });
+  if (list.length > HISTORY_LIMIT) list.length = HISTORY_LIMIT;
+  try { saveHistory(list); } catch (e) { console.log('[frost-mirror] 历史写入失败:', e.message); }
+}
+
+// ---- 术语表:与 settings.json 同目录 terms.json;双通道(语境=提示词软约束,默认 / 严格=占位符保护) ----
+const PRESET_FILE = path.join(__dirname, 'assets', 'terms-preset.json');
+
+function loadTerms() {
+  try {
+    const t = JSON.parse(fs.readFileSync(TERMS_FILE, 'utf8'));
+    return {
+      enabled: t.enabled !== false,
+      channel: t.channel === 'strict' ? 'strict' : 'context',
+      terms: Array.isArray(t.terms) ? t.terms : [],
+    };
+  } catch {
+    return { enabled: true, channel: 'context', terms: [] };
+  }
+}
+
+function saveTerms(data) {
+  fs.writeFileSync(TERMS_FILE, JSON.stringify(data, null, 2));
+}
+
+function termId() {
+  return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// ---- 旧版本数据迁移 ----
+// 之前的便携版把配置写在 exe 旁边:换文件夹就会出现一份"新配置"。
+// 打包版首次运行(新目录还没有配置时)把 exe 旁的 settings/terms/history 和 glass-data 挪过来,
+// 老用户升级后不用重填;dev 模式配置本来就在项目根目录,跳过。
+// 不用 fs.cpSync:它走 native 拷贝,在此 Windows/Node 组合下有偶发崩溃;逐文件复制也更抗中断。
+function copyRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, entry.name);
+    const to = path.join(dest, entry.name);
+    if (entry.isDirectory()) copyRecursive(from, to);
+    else fs.copyFileSync(from, to);
+  }
+}
+
+function migrateLegacyData() {
+  if (!app.isPackaged) return;
+  const marker = path.join(DATA_DIR, '.migrated');
+  if (fs.existsSync(marker)) return; // 已完成过迁移
+  const legacyDir = path.dirname(app.getPath('exe'));
+  if (legacyDir === DATA_DIR) return;
+  const legacy = path.join(legacyDir, 'glass-data');
+  const hasOldConfig = fs.existsSync(path.join(legacyDir, 'settings.json'))
+    || fs.existsSync(legacy)
+    || fs.existsSync(path.join(legacyDir, 'terms.json'))
+    || fs.existsSync(path.join(legacyDir, 'history.json'));
+  if (!hasOldConfig) return;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    for (const name of ['settings.json', 'terms.json', 'history.json']) {
+      const src = path.join(legacyDir, name);
+      const dst = path.join(DATA_DIR, name);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
+    }
+    if (fs.existsSync(legacy)) copyRecursive(legacy, path.join(DATA_DIR, 'glass-data'));
+    fs.writeFileSync(marker, String(Date.now())); // 写完成标记:中断过的迁移下次启动会继续补齐
+    console.log('[frost-mirror] 已从 exe 旁迁移旧配置到', DATA_DIR);
+  } catch (e) {
+    console.log('[frost-mirror] 旧配置迁移失败(不影响继续运行):', e.message);
+  }
+}
+
+migrateLegacyData();
+
+// 缓存也放进同一目录,避免散落;dev 模式保持默认(项目根的 glass-data 会污染仓库)
+if (app.isPackaged) {
+  app.setPath('userData', path.join(DATA_DIR, 'glass-data'));
 }
 
 let win = null;
@@ -22,6 +191,7 @@ let isQuitting = false;
 // 剪贴板监听状态:主进程轮询记录上次读到的内容与本应用最近写入的内容(防自循环)
 let lastClipText = '';
 let lastAppWrittenText = '';
+let lastDispatchedClip = ''; // 最近一次已触发翻译的剪贴板内容:热键只翻新内容,不重复翻旧内容
 let clipWatchEnabled = true;
 
 function readSettings() {
@@ -48,9 +218,10 @@ function readSettings() {
       deepMode: !!raw.deepMode,
       clipWatch: raw.clipWatch !== false, // 复制即翻开关,默认开
       hotkey: typeof raw.hotkey === 'string' && raw.hotkey ? raw.hotkey : 'Alt+Q',
+      dataDirNoticeShown: !!raw.dataDirNoticeShown, // 数据目录告知弹窗只弹一次
     };
   } catch {
-    return { baseUrl: '', model: '', apiKey: '', tint: 0.3, onboarded: false, langTarget: 'auto', deepMode: false, clipWatch: true, hotkey: 'Alt+Q' };
+    return { baseUrl: '', model: '', apiKey: '', tint: 0.3, onboarded: false, langTarget: 'auto', deepMode: false, clipWatch: true, hotkey: 'Alt+Q', dataDirNoticeShown: false };
   }
 }
 
@@ -69,12 +240,17 @@ function saveSettings(s) {
   if (typeof s.deepMode === 'boolean') data.deepMode = s.deepMode;
   if (typeof s.clipWatch === 'boolean') data.clipWatch = s.clipWatch;
   if (typeof s.hotkey === 'string') data.hotkey = s.hotkey;
+  if (typeof s.dataDirNoticeShown === 'boolean') data.dataDirNoticeShown = s.dataDirNoticeShown;
   if (s.apiKey) {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统加密不可用');
     data.apiKeyEnc = safeStorage.encryptString(s.apiKey).toString('base64');
   }
+  const configured = !!(data.baseUrl && data.model && data.apiKeyEnc);
+  const firstConfig = configured && !data.dataDirNoticeShown;
+  if (firstConfig) data.dataDirNoticeShown = true; // 首次配置完成才弹一次提示
   fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+  return { dataDir: DATA_DIR, firstConfig };
 }
 
 // 思考模式由调用方决定:普通翻译关闭(快且省);深度模式开启(thinking enabled + low 强度,更慢更贵)
@@ -134,23 +310,73 @@ const LANG_NAMES = {
 // 词典模式提示词:孤词查询时列出全部常见义项,而非按句子翻译
 const DICT_PROMPT = '这是一个词典查询。请列出该词的所有常见义项:按词性分组,每项给出中文释义和一条简短例句;常用搭配与习语也请列出。';
 
-async function translate({ baseUrl, model, apiKey, text, target, deep, mode }) {
+async function translate({ baseUrl, model, apiKey, text, target, deep, mode, signal, onDelta }) {
   const isDict = mode === 'dict';
   const langName = LANG_NAMES[target] || target;
-  const system = isDict
+  let system = isDict
     ? `你是一个词典。只输出词典内容本身,不要任何解释或额外文字。${DICT_PROMPT}`
     : `你是一个翻译引擎。只输出译文本身,不要任何解释或额外文字。目标语言:${langName}。`;
-  const data = await chatCompletion(baseUrl, model, apiKey, {
+
+  // 术语表联动:仅整句翻译通道生效;词典通道只做"用户译名置顶"
+  const terms = loadTerms();
+  const activeTerms = terms.enabled ? terms.terms.filter((t) => t.enabled !== false) : [];
+  let termHits = [];
+  let placeholderMap = null;
+  let work = text;
+
+  if (isDict) {
+    const hit = activeTerms.find((t) => t.source.trim().toLowerCase() === text.trim().toLowerCase());
+    if (hit) {
+      system += `\n注意:用户已为该词指定译名「${hit.target}」,请把对应义项放在最前面并标注为用户指定译法。`;
+    }
+  } else if (activeTerms.length) {
+    termHits = findTermHits(text, activeTerms);
+    if (termHits.length && terms.channel === 'strict') {
+      // 严格通道:命中的词先替换成占位符,提示词要求原样保留,返回后还原成译名(确定性)
+      placeholderMap = [];
+      termHits.forEach((t, i) => {
+        const re = buildTermRegex(t.source, !!t.caseSensitive);
+        const before = work;
+        work = work.replace(re, `⟪${i}⟫`);
+        if (work !== before) placeholderMap[i] = t;
+      });
+      if (placeholderMap.some(Boolean)) {
+        system += '\n文本中形如 ⟪数字⟫ 的是占位符,请在译文中原样保留,不要翻译、改写或删除它们。';
+      } else {
+        placeholderMap = null; // 全都没实际替换成功,按无术语处理
+      }
+    } else if (termHits.length) {
+      // 语境通道(默认):对照表软约束,词性/语境不符时允许自然译法
+      const lines = termHits.map((t) =>
+        `- ${t.source} → ${t.target === t.source ? '(保持原文不译)' : t.target}${t.desc ? `(${t.desc})` : ''}`
+      );
+      system += `\n\n术语对照表(翻译时优先遵循;若词性/语境明显不符,可选更自然的译法):\n${lines.join('\n')}`;
+    }
+  }
+
+  const r = await streamChatCompletion(baseUrl, model, apiKey, {
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: text },
+      { role: 'user', content: work },
     ],
     temperature: 0.2,
-  }, { thinking: !!deep, effort: 'low' });
-  return {
-    translation: (data.choices?.[0]?.message?.content || '').trim(),
-    tokens: data.usage?.total_tokens ?? 0,
-  };
+  }, { thinking: !!deep, effort: 'low', signal, onDelta });
+
+  let translation = r.translation;
+  if (placeholderMap) {
+    // 占位符还原;模型改写导致对不上的残留占位符直接清掉,避免露出奇怪符号
+    translation = (translation || '').replace(/⟪(\d+)⟫/g, (m, n) => {
+      const t = placeholderMap[Number(n)];
+      return t ? t.target : m;
+    }).replace(/⟪\d+⟫/g, '');
+  }
+
+  // 冲突检测(语境通道):原文命中了条目但译文没采用译名 → 渲染层显示小标记
+  const termConflicts = placeholderMap || isDict || !termHits.length
+    ? []
+    : termHits.filter((t) => t.target !== t.source && !(translation || '').includes(t.target)).map((t) => t.source);
+
+  return { translation, tokens: r.tokens, termConflicts };
 }
 
 // ---- Win32 亚克力模糊 ----
@@ -260,6 +486,32 @@ function createTray() {
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:save', (e, s) => saveSettings(s));
 ipcMain.handle('settings:validate', (e, s) => validateSettings(s));
+// 数据存储位置:查询当前目录与可用模式;切换会迁移数据并记录模式(重启保持)
+ipcMain.handle('settings:get-data-dir', () => {
+  return {
+    dataDir: DATA_DIR,
+    mode: currentDataMode(),
+    customDir: dataCustomDir(),
+    exeDir: EXE_DIR,
+    appDataDir: APP_DATA_DIR,
+  };
+});
+ipcMain.handle('settings:set-data-dir', (e, { mode, dir } = {}) => {
+  try {
+    const moved = switchDataDir(mode, dir || '');
+    return { ok: true, dataDir: DATA_DIR, mode: currentDataMode(), moved };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+// 系统目录选择器:返回用户选中的目录,取消返回 null
+ipcMain.handle('dialog:select-dir', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择数据存储目录',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+});
 ipcMain.handle('settings:set-tint', (e, t) => {
   const cur = readSettings();
   cur.tint = Math.min(1, Math.max(0, Number(t) || 0));
@@ -276,14 +528,130 @@ ipcMain.handle('settings:set-deep-mode', (e, v) => {
   saveSettings(cur);
 });
 
-ipcMain.handle('translate:run', async (e, { text, target, mode }) => {
+// 进行中的流式翻译:seq → AbortController。渲染层 reset/发起新请求时中止旧流,避免白白消耗 token。
+const activeRuns = new Map();
+
+ipcMain.handle('translate:run', async (e, { text, target, mode, seq }) => {
   const s = readSettings();
   if (!s.apiKey || !s.baseUrl || !s.model) {
     throw new Error('请先在设置里填写 API Key、接口地址和模型');
   }
+  const controller = new AbortController();
+  activeRuns.set(seq, controller);
+  const timer = setTimeout(() => controller.abort(), 60000); // 60 秒整体上限,避免永远"翻译中…"
   const started = Date.now();
-  const r = await translate({ ...s, text, target, deep: s.deepMode, mode });
-  return { ...r, ms: Date.now() - started };
+  try {
+    const r = await translate({
+      ...s, text, target, deep: s.deepMode, mode,
+      signal: controller.signal,
+      onDelta: (delta) => {
+        try { e.sender.send('translate:delta', { seq, delta }); } catch {}
+      },
+    });
+    const out = { ...r, ms: Date.now() - started };
+    addHistory({ text, translation: r.translation || '', mode, target, tokens: r.tokens, ms: out.ms });
+    return out;
+  } finally {
+    clearTimeout(timer);
+    activeRuns.delete(seq);
+  }
+});
+
+ipcMain.handle('translate:cancel', (e, seq) => {
+  const c = activeRuns.get(seq);
+  if (c) {
+    c.abort();
+    activeRuns.delete(seq);
+  }
+});
+
+// ---- 历史记录 IPC ----
+ipcMain.handle('history:list', () => loadHistory());
+ipcMain.handle('history:delete', (e, id) => {
+  const list = loadHistory().filter((x) => x.id !== id);
+  try { saveHistory(list); } catch (err) { console.log('[frost-mirror] 历史写入失败:', err.message); }
+});
+ipcMain.handle('history:clear', () => {
+  try { saveHistory([]); } catch (err) { console.log('[frost-mirror] 历史清空失败:', err.message); }
+});
+
+// ---- 术语表 IPC ----
+ipcMain.handle('terms:get', () => loadTerms());
+
+ipcMain.handle('terms:set-config', (e, cfg) => {
+  const t = loadTerms();
+  if (typeof cfg.enabled === 'boolean') t.enabled = cfg.enabled;
+  if (cfg.channel === 'strict' || cfg.channel === 'context') t.channel = cfg.channel;
+  saveTerms(t);
+});
+
+ipcMain.handle('terms:add', (e, { source, target, desc }) => {
+  const src = String(source || '').trim();
+  const dst = String(target || '').trim();
+  if (!src || !dst) throw new Error('原文与译名都要填写');
+  const t = loadTerms();
+  const exist = t.terms.find((x) => (x.source || '').toLowerCase() === src.toLowerCase());
+  if (exist) {
+    exist.target = dst;
+    exist.desc = String(desc || '').trim();
+    saveTerms(t);
+    return { updated: true };
+  }
+  t.terms.push({ id: termId(), source: src, target: dst, desc: String(desc || '').trim(), caseSensitive: false, enabled: true });
+  saveTerms(t);
+  return { updated: false };
+});
+
+ipcMain.handle('terms:remove', (e, id) => {
+  const t = loadTerms();
+  t.terms = t.terms.filter((x) => x.id !== id);
+  saveTerms(t);
+});
+
+ipcMain.handle('terms:toggle', (e, { id, enabled }) => {
+  const t = loadTerms();
+  const item = t.terms.find((x) => x.id === id);
+  if (item) {
+    item.enabled = !!enabled;
+    saveTerms(t);
+  }
+});
+
+ipcMain.handle('terms:import-csv', (e, text) => {
+  const rows = parseCsv(text).filter((r) => r[0] && r[1]);
+  if (rows[0] && /^source$/i.test(rows[0][0])) rows.shift(); // 跳过表头
+  const t = loadTerms();
+  let added = 0;
+  let updated = 0;
+  for (const r of rows) {
+    const [src, dst, desc = '', cs = ''] = r;
+    const exist = t.terms.find((x) => (x.source || '').toLowerCase() === src.toLowerCase());
+    if (exist) {
+      exist.target = dst;
+      if (desc) exist.desc = desc;
+      exist.caseSensitive = /^true$/i.test(cs);
+      updated++;
+    } else {
+      t.terms.push({ id: termId(), source: src, target: dst, desc, caseSensitive: /^true$/i.test(cs), enabled: true });
+      added++;
+    }
+  }
+  saveTerms(t);
+  return { added, updated };
+});
+
+ipcMain.handle('terms:restore-preset', () => {
+  const preset = JSON.parse(fs.readFileSync(PRESET_FILE, 'utf8'));
+  const t = loadTerms();
+  let added = 0;
+  for (const p of preset) {
+    if (!p.source || !p.target) continue;
+    if (t.terms.some((x) => (x.source || '').toLowerCase() === p.source.toLowerCase())) continue;
+    t.terms.push({ id: termId(), source: p.source, target: p.target, desc: p.desc || '', caseSensitive: false, enabled: true });
+    added++;
+  }
+  saveTerms(t);
+  return { added };
 });
 
 ipcMain.handle('window:minimize', () => win?.minimize());
@@ -299,6 +667,14 @@ ipcMain.handle('clipboard:write', (e, t) => {
   const s = String(t ?? '');
   clipboard.writeText(s);
   lastAppWrittenText = s; // 记录本应用写入的内容,轮询读到时忽略,避免复制译文又触发翻译
+  lastDispatchedClip = s; // 复制译文后按热键,也不应把译文再翻一遍
+});
+ipcMain.handle('shell:open-external', (e, url) => {
+  // 只允许 http/https,防止渲染层借道打开任意本地程序/协议
+  try {
+    const u = new URL(String(url));
+    if (u.protocol === 'https:' || u.protocol === 'http:') shell.openExternal(u.href);
+  } catch {}
 });
 
 // ---- 剪贴板监听(复制即翻)----
@@ -318,6 +694,7 @@ function startClipWatch() {
       return;
     }
     if (text.length > 2000) return;
+    lastDispatchedClip = text; // 复制即翻已处理过该内容,之后热键呼出不再重复翻译
     // 不夺焦点:窗口显示但焦点留在用户当前应用,不打断阅读;热键呼出才抢焦点
     if (!win.isVisible()) win.showInactive();
     win.webContents.send('clipboard:changed', { text, source: 'watch' });
@@ -342,7 +719,9 @@ function onHotkeyTrigger() {
   win.focus();
   let text = '';
   try { text = clipboard.readText(); } catch {}
-  if (text && text.length <= 2000) {
+  // 只翻"新"内容:与最近一次已触发翻译的剪贴板相同 → 只呼出窗口,不重复翻译
+  if (text && text.length <= 2000 && text !== lastDispatchedClip) {
+    lastDispatchedClip = text;
     win.webContents.send('clipboard:changed', { text, source: 'hotkey' });
   }
 }
